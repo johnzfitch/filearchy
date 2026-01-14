@@ -1204,9 +1204,8 @@ dependencies = [
 
 [[package]]
 name = "compio"
-version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "362c95e8e1a569b50b7e6642156eccd3678f03b4afa59834f18fad8af5649587"
+version = "0.17.0"
+source = "git+https://github.com/jackpot51/compio.git#8235a1fcccde233362bb76df45b509c12ca79972"
 dependencies = [
  "compio-buf",
  "compio-driver",
@@ -1214,15 +1213,13 @@ dependencies = [
  "compio-io",
  "compio-log",
  "compio-macros",
- "compio-net",
  "compio-runtime",
 ]
 
 [[package]]
 name = "compio-buf"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5881ed3b06004d5e505746e6780dbbaf76fc508201e57bb5c84fcb4d69b8c23e"
+version = "0.7.1"
+source = "git+https://github.com/jackpot51/compio.git#8235a1fcccde233362bb76df45b509c12ca79972"
 dependencies = [
  "arrayvec",
  "bytes",
@@ -1231,9 +1228,8 @@ dependencies = [
 
 [[package]]
 name = "compio-driver"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "823d0ce45a1b350878ce69a143ce75d6e95cbd00b7fc578e2de2f8142692c537"
+version = "0.10.0"
+source = "git+https://github.com/jackpot51/compio.git#8235a1fcccde233362bb76df45b509c12ca79972"
 dependencies = [
  "cfg-if",
  "cfg_aliases 0.2.1",
@@ -1247,17 +1243,18 @@ dependencies = [
  "libc",
  "once_cell",
  "paste",
+ "pin-project-lite",
  "polling 3.11.0",
  "slab",
  "socket2 0.6.1",
+ "thin-cell",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "compio-fs"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea585c274239b9fd350a484c75a31fd0df5f031805b6664d83a98f5e8b019e2f"
+version = "0.10.0"
+source = "git+https://github.com/jackpot51/compio.git#8235a1fcccde233362bb76df45b509c12ca79972"
 dependencies = [
  "cfg-if",
  "cfg_aliases 0.2.1",
@@ -1273,9 +1270,8 @@ dependencies = [
 
 [[package]]
 name = "compio-io"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d125bc35ccd1ed098665218ce4f12a6c4a73855c151feff1b47fd7ba104f7955"
+version = "0.8.4"
+source = "git+https://github.com/jackpot51/compio.git#8235a1fcccde233362bb76df45b509c12ca79972"
 dependencies = [
  "compio-buf",
  "futures-util",
@@ -1285,8 +1281,7 @@ dependencies = [
 [[package]]
 name = "compio-log"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc4e560213c1996b618da369b7c9109564b41af9033802ae534465c4ee4e132f"
+source = "git+https://github.com/jackpot51/compio.git#8235a1fcccde233362bb76df45b509c12ca79972"
 dependencies = [
  "tracing",
 ]
@@ -1294,8 +1289,7 @@ dependencies = [
 [[package]]
 name = "compio-macros"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f05ed201484967dc70de77a8f7a02b29aaa8e6c81cbea2e75492ee0c8d97766b"
+source = "git+https://github.com/jackpot51/compio.git#8235a1fcccde233362bb76df45b509c12ca79972"
 dependencies = [
  "proc-macro-crate 3.4.0",
  "proc-macro2",
@@ -1304,32 +1298,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "compio-net"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e6ea7aa4a9f38d68dd0098a11232236cb3efd0ef3cab50ecdada3d745f1f776"
-dependencies = [
- "cfg-if",
- "compio-buf",
- "compio-driver",
- "compio-io",
- "compio-runtime",
- "either",
- "libc",
- "once_cell",
- "socket2 0.6.1",
- "widestring",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "compio-runtime"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5f917dcd14830bcd0e0ee7a47bcf4fd1cbee5f45c55c0433efb242511104952"
+version = "0.10.1"
+source = "git+https://github.com/jackpot51/compio.git#8235a1fcccde233362bb76df45b509c12ca79972"
 dependencies = [
  "async-task",
- "cfg-if",
  "compio-buf",
  "compio-driver",
  "compio-log",
@@ -2171,7 +2144,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2419,9 +2392,9 @@ dependencies = [
 
 [[package]]
 name = "flume"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
 dependencies = [
  "spin",
 ]
@@ -2781,7 +2754,7 @@ dependencies = [
  "gobject-sys",
  "libc",
  "system-deps 7.0.7",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4008,9 +3981,9 @@ dependencies = [
 
 [[package]]
 name = "io_uring_buf_ring"
-version = "0.2.1"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a8867874ff5758b47c1dac069e6e86541432f9da8be9111c5e94154134f07d0"
+checksum = "1838759bb8c2f24cf05a35429d83145c4aa6af43f8ad38477295e12a7320a80e"
 dependencies = [
  "bytes",
  "io-uring",
@@ -5123,7 +5096,7 @@ version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff32365de1b6743cb203b710788263c44a03de03802daf96092f2da4fe6ba4d7"
 dependencies = [
- "proc-macro-crate 3.4.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.108",
@@ -5472,7 +5445,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -6466,7 +6439,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6479,7 +6452,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7129,7 +7102,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7162,6 +7135,12 @@ dependencies = [
  "quote",
  "syn 2.0.108",
 ]
+
+[[package]]
+name = "thin-cell"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4164c6c316ba9733b0ab021e7f9852c788a4b991b49c25820f1be48e1d41345b"
 
 [[package]]
 name = "thiserror"
@@ -8235,7 +8214,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

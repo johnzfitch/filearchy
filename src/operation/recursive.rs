@@ -7,7 +7,7 @@ use std::time::Instant;
 use std::{cell::Cell, error::Error, fs, ops::ControlFlow, path::PathBuf, rc::Rc};
 use walkdir::WalkDir;
 
-use crate::operation::OperationError;
+use crate::operation::{OperationError, sync_to_disk};
 
 use super::{Controller, OperationSelection, ReplaceResult, copy_unique_path};
 
@@ -187,6 +187,9 @@ impl Context {
                 return Ok(false);
             }
         }
+
+        // Flush files to disk
+        sync_to_disk(written_files, target_dirs).await;
 
         Ok(true)
     }

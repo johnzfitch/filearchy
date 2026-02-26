@@ -3470,7 +3470,8 @@ impl Application for App {
                                     to.clone(),
                                     contents,
                                 )),
-                                None => cosmic::action::none(),
+                                // No file data in clipboard, try image data
+                                None => cosmic::action::app(Message::PasteImage(to.clone())),
                             }
                         });
                     }

@@ -1134,7 +1134,24 @@ pub fn scan_trash(sizes: IconSizes) -> Vec<Item> {
     let mut items: Vec<_> = entries
         .into_iter()
         .filter_map(|entry| {
-            let metadata = trash::os_limited::metadata(&entry)
+            // trash-rs freedesktop.rs:292 uses assert!() instead of returning Err when
+            // the file in Trash/files/ doesn't exist (race between list() and metadata(),
+            // or orphaned .trashinfo files). Catch the panic so one bad entry doesn't
+            // crash the whole scan.
+            let metadata =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    trash::os_limited::metadata(&entry)
+                }))
+                .unwrap_or_else(|_| {
+                    log::warn!(
+                        "trash::os_limited::metadata panicked for {:?} \
+                         (orphaned or in-flight trash entry, skipping)",
+                        entry
+                    );
+                    Err(trash::Error::Unknown {
+                        description: "orphaned trash entry".into(),
+                    })
+                })
                 .inspect_err(|err| {
                     log::warn!("failed to get metadata for trash item {entry:?}: {err}")
                 })

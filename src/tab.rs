@@ -4599,10 +4599,23 @@ impl Tab {
 
         let size = self.size_opt.get().unwrap_or(Size::new(0.0, 0.0));
 
-        let mut row = widget::row::with_capacity(5)
+        let mut row = widget::row::with_capacity(6)
             .align_y(Alignment::Center)
             .padding([space_xxxs, 0]);
         let mut w = 0.0;
+
+        // Grid/List view toggle button
+        let (view_icon, next_view_action) = match self.config.view {
+            View::Grid => ("view-list-symbolic", Action::TabViewList),
+            View::List => ("view-grid-symbolic", Action::TabViewGrid),
+        };
+        let view_button =
+            widget::button::custom(widget::icon::from_name(view_icon).size(16))
+                .on_press(Message::ContextAction(next_view_action))
+                .padding(space_xxs)
+                .class(theme::Button::Icon);
+        row = row.push(view_button);
+        w += f32::from(space_xxs).mul_add(2.0, 16.0);
 
         let mut prev_button =
             widget::button::custom(widget::icon::from_name("go-previous-symbolic").size(16))

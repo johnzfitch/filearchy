@@ -205,6 +205,12 @@ pub fn context_menu<'a>(
                     children.push(menu_item(fl!("cut"), Action::Cut).into());
                 }
                 children.push(menu_item(fl!("copy"), Action::Copy).into());
+                if selected == 1 {
+                    children.push(menu_item(fl!("copy-path"), Action::CopyPath).into());
+                }
+                if selected_dir == 1 && selected == 1 {
+                    children.push(menu_item(fl!("paste-into-folder"), Action::PasteInto).into());
+                }
 
                 children.push(divider::horizontal::light().into());
                 let supported_archive_types = crate::archive::SUPPORTED_ARCHIVE_TYPES;

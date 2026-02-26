@@ -145,6 +145,7 @@ pub enum Action {
     AddToSidebar,
     Compress,
     Copy,
+    CopyPath,
     Cut,
     CosmicSettingsDesktop,
     CosmicSettingsDisplays,
@@ -176,6 +177,7 @@ pub enum Action {
     OpenTerminal,
     OpenWith,
     Paste,
+    PasteInto,
     PermanentlyDelete,
     Preview,
     Reload,
@@ -212,6 +214,7 @@ impl Action {
             Self::AddToSidebar => Message::AddToSidebar(entity_opt),
             Self::Compress => Message::Compress(entity_opt),
             Self::Copy => Message::Copy(entity_opt),
+            Self::CopyPath => Message::CopyPath(entity_opt),
             Self::Cut => Message::Cut(entity_opt),
             Self::CosmicSettingsDesktop => Message::CosmicSettings("desktop"),
             Self::CosmicSettingsDisplays => Message::CosmicSettings("displays"),
@@ -245,6 +248,7 @@ impl Action {
             Self::OpenTerminal => Message::OpenTerminal(entity_opt),
             Self::OpenWith => Message::OpenWithDialog(entity_opt),
             Self::Paste => Message::Paste(entity_opt),
+            Self::PasteInto => Message::PasteInto(entity_opt),
             Self::PermanentlyDelete => Message::PermanentlyDelete(entity_opt),
             Self::Preview => Message::Preview(entity_opt),
             Self::Reload => Message::TabMessage(entity_opt, tab::Message::Reload),
@@ -334,6 +338,7 @@ pub enum Message {
     Compress(Option<Entity>),
     Config(Config),
     Copy(Option<Entity>),
+    CopyPath(Option<Entity>),
     CosmicSettings(&'static str),
     Cut(Option<Entity>),
     Delete(Option<Entity>),
@@ -386,6 +391,7 @@ pub enum Message {
     #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
     Overlap(window::Id, OverlapNotifyEvent),
     Paste(Option<Entity>),
+    PasteInto(Option<Entity>),
     PasteContents(PathBuf, ClipboardPaste),
     PasteImage(PathBuf),
     PasteImageContents(PathBuf, ClipboardPasteImage),
@@ -1991,6 +1997,12 @@ impl App {
                     Some(self.config.type_to_search),
                     Message::SetTypeToSearch,
                 ))
+                .add(widget::radio(
+                    widget::text::body(fl!("type-to-search-select")),
+                    TypeToSearch::SelectByPrefix,
+                    Some(self.config.type_to_search),
+                    Message::SetTypeToSearch,
+                ))
                 .into(),
             widget::settings::section()
                 .title(fl!("other"))
@@ -2668,6 +2680,12 @@ impl Application for App {
                 let contents = ClipboardCopy::new(ClipboardKind::Copy, paths);
                 return clipboard::write_data(contents);
             }
+            Message::CopyPath(entity_opt) => {
+                let paths = self.selected_paths(entity_opt);
+                if let Some(path) = paths.into_iter().next() {
+                    return clipboard::write(path.to_string_lossy().into_owned());
+                }
+            }
             Message::Cut(entity_opt) => {
                 self.set_cut(entity_opt);
                 let paths = self.selected_paths(entity_opt);
@@ -3003,8 +3021,43 @@ impl Application for App {
                 let in_surface_ids = false;
                 if self.core.main_window_id() == Some(window_id) || in_surface_ids {
                     let entity = self.tab_model.active();
+
+                    // Check if a text input is focused — skip file operation shortcuts when so
+                    let editing_location = self
+                        .tab_model
+                        .data::<Tab>(entity)
+                        .is_some_and(|tab| tab.edit_location.is_some());
+                    let editing_search = self.search_get().is_some();
+                    let dialog_open = self.dialog_pages.front().is_some();
+                    let editing_text_input = editing_location || editing_search || dialog_open;
+                    let is_insert = matches!(
+                        key,
+                        Key::Named(cosmic::iced::keyboard::key::Named::Insert)
+                    );
+
+                    // Shift+Insert in a text input: let the widget handle it as text paste
+                    if is_insert && editing_text_input {
+                        if modifiers.shift() && !modifiers.control() {
+                            return Task::none();
+                        }
+                    }
+
+                    // Backspace while editing text should not trigger HistoryPrevious
+                    if editing_text_input
+                        && matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Backspace))
+                    {
+                        return Task::none();
+                    }
+
                     for (key_bind, action) in &self.key_binds {
                         if key_bind.matches(modifiers, &key) {
+                            // Skip Copy/Cut/Paste when editing text inputs
+                            // (let the text input widget handle these)
+                            if editing_text_input
+                                && matches!(action, Action::Copy | Action::Cut | Action::Paste)
+                            {
+                                continue;
+                            }
                             return self.update(action.message(Some(entity)));
                         }
                     }
@@ -3044,6 +3097,13 @@ impl Application for App {
                                                 Some(location.with_path(path_string.into()).into());
                                         }
                                     }
+                                }
+                                TypeToSearch::SelectByPrefix => {
+                                    // Fall back to recursive search
+                                    let mut term =
+                                        self.search_get().unwrap_or_default().to_string();
+                                    term.push_str(&text);
+                                    return self.search_set_active(Some(term));
                                 }
                             }
                         }
@@ -3475,6 +3535,29 @@ impl Application for App {
                             }
                         });
                     }
+                }
+            }
+            Message::PasteInto(entity_opt) => {
+                // Paste into the first selected directory
+                let entity = entity_opt.unwrap_or_else(|| self.tab_model.active());
+                let target_dir = self.tab_model.data::<Tab>(entity).and_then(|tab| {
+                    tab.items_opt().and_then(|items| {
+                        items
+                            .iter()
+                            .find(|item| item.selected && item.metadata.is_dir())
+                            .and_then(|item| item.path_opt())
+                            .map(|p| p.to_path_buf())
+                    })
+                });
+                if let Some(to) = target_dir {
+                    return clipboard::read_data::<ClipboardPaste>().map(move |contents_opt| {
+                        match contents_opt {
+                            Some(contents) => {
+                                cosmic::action::app(Message::PasteContents(to.clone(), contents))
+                            }
+                            None => cosmic::action::app(Message::PasteImage(to.clone())),
+                        }
+                    });
                 }
             }
             Message::PasteContents(to, mut contents) => {
@@ -5990,8 +6073,17 @@ impl Application for App {
                     text,
                     ..
                 }) => match status {
+                    // Only forward uncaptured key events (captured means a widget handled it)
                     event::Status::Ignored => Some(Message::Key(window_id, modifiers, key, text)),
-                    event::Status::Captured => None,
+                    // Exception: Always forward Insert key for omarchy clipboard bindings
+                    // (Super+C/V send Ctrl/Shift+Insert via sendshortcut)
+                    event::Status::Captured => {
+                        if matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert)) {
+                            Some(Message::Key(window_id, modifiers, key, text))
+                        } else {
+                            None
+                        }
+                    }
                 },
                 Event::Keyboard(KeyEvent::ModifiersChanged(modifiers)) => {
                     Some(Message::ModifiersChanged(window_id, modifiers))

@@ -1448,6 +1448,12 @@ impl Application for App {
                                         Some(location.with_path(PathBuf::from(path_string)).into());
                                 }
                             }
+                            TypeToSearch::SelectByPrefix => {
+                                // Fall back to recursive search
+                                let mut term = self.search_get().unwrap_or_default().to_string();
+                                term.push_str(&text);
+                                return self.search_set(Some(term));
+                            }
                         }
                     }
                 }

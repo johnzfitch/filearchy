@@ -59,10 +59,13 @@ impl AppTheme {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Favorite {
     Home,
+    Desktop,
     Documents,
     Downloads,
     Music,
     Pictures,
+    Public,
+    Templates,
     Videos,
     Path(PathBuf),
     Network {
@@ -77,10 +80,13 @@ impl Favorite {
         // Ensure that special folders are handled properly
         [
             Self::Home,
+            Self::Desktop,
             Self::Documents,
             Self::Downloads,
             Self::Music,
             Self::Pictures,
+            Self::Public,
+            Self::Templates,
             Self::Videos,
         ]
         .into_iter()
@@ -91,10 +97,13 @@ impl Favorite {
     pub fn path_opt(&self) -> Option<PathBuf> {
         match self {
             Self::Home => dirs::home_dir(),
+            Self::Desktop => dirs::desktop_dir(),
             Self::Documents => dirs::document_dir(),
             Self::Downloads => dirs::download_dir(),
             Self::Music => dirs::audio_dir(),
             Self::Pictures => dirs::picture_dir(),
+            Self::Public => dirs::public_dir(),
+            Self::Templates => dirs::template_dir(),
             Self::Videos => dirs::video_dir(),
             Self::Path(path) => Some(path.clone()),
             Self::Network { path, .. } => Some(path.clone()),
@@ -106,6 +115,7 @@ impl Favorite {
 pub enum TypeToSearch {
     Recursive,
     EnterPath,
+    SelectByPrefix,
 }
 
 #[derive(Clone, CosmicConfigEntry, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -221,10 +231,13 @@ impl Default for Config {
             thumb_cfg: ThumbCfg::default(),
             favorites: vec![
                 Favorite::Home,
+                Favorite::Desktop,
                 Favorite::Documents,
                 Favorite::Downloads,
                 Favorite::Music,
                 Favorite::Pictures,
+                Favorite::Public,
+                Favorite::Templates,
                 Favorite::Videos,
             ],
             show_details: false,

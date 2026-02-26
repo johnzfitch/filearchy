@@ -337,6 +337,9 @@ edit = Edit
 cut = Cut
 copy = Copy
 paste = Paste
+pasted-image = pasted-image
+pasted-video = pasted-video
+pasted-text = pasted-text
 select-all = Select all
 
 ## View

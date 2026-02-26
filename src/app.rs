@@ -70,7 +70,7 @@ use wayland_client::{Proxy, protocol::wl_output::WlOutput};
 
 use crate::{
     FxOrderMap,
-    clipboard::{ClipboardCopy, ClipboardKind, ClipboardPaste},
+    clipboard::{ClipboardCopy, ClipboardKind, ClipboardPaste, ClipboardPasteImage, ClipboardPasteVideo, ClipboardPasteText},
     config::{
         AppTheme, Config, DesktopConfig, Favorite, IconSizes, TIME_CONFIG_ID, TabConfig,
         TimeConfig, TypeToSearch,
@@ -85,7 +85,7 @@ use crate::{
     mounter::{MOUNTERS, MounterAuth, MounterItem, MounterItems, MounterKey, MounterMessage},
     operation::{
         Controller, Operation, OperationError, OperationErrorType, OperationSelection,
-        ReplaceResult,
+        ReplaceResult, copy_unique_path,
     },
     spawn_detached::spawn_detached,
     tab::{
@@ -387,6 +387,12 @@ pub enum Message {
     Overlap(window::Id, OverlapNotifyEvent),
     Paste(Option<Entity>),
     PasteContents(PathBuf, ClipboardPaste),
+    PasteImage(PathBuf),
+    PasteImageContents(PathBuf, ClipboardPasteImage),
+    PasteVideo(PathBuf),
+    PasteVideoContents(PathBuf, ClipboardPasteVideo),
+    PasteText(PathBuf),
+    PasteTextContents(PathBuf, ClipboardPasteText),
     PendingCancel(u64),
     PendingCancelAll,
     PendingComplete(u64, OperationSelection),

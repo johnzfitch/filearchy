@@ -1894,8 +1894,11 @@ impl ItemThumbnail {
         };
 
         let mut tried_supported_file = false;
+        // SVG has its own internal thumbnailer below; skip the image crate path for it
+        // because the image crate does not support SVG and would just log an error.
+        let is_svg = mime.subtype().as_str() == "svg+xml";
         // First try built-in image thumbnailer
-        if mime.type_() == mime::IMAGE && check_size("image", max_size_mb * 1000 * 1000) {
+        if mime.type_() == mime::IMAGE && !is_svg && check_size("image", max_size_mb * 1000 * 1000) {
             // Check if image dimensions would exceed available memory budget
             // The GPU tiling system can handle large images, but we still need to decode them first
             let dimensions_ok = match image::image_dimensions(path) {
@@ -4786,7 +4789,6 @@ impl Tab {
                 .id(self.edit_location_id.clone())
                 .on_focus(Message::EditLocationFocus(true))
                 .on_unfocus(Message::EditLocationFocus(false))
-                .select_on_focus(true)
                 .on_input(move |input| {
                     let new_loc = if is_network {
                         base_location.with_uri(input)

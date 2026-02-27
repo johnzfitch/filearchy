@@ -98,6 +98,10 @@ use crate::{
     zoom::{zoom_in_view, zoom_out_view, zoom_to_default},
 };
 
+/// Minimum search term length before a recursive search is triggered.
+/// Prevents searching on every single character when the term is too short to be useful.
+const SEARCH_MIN_LEN: usize = 2;
+
 static PERMANENT_DELETE_BUTTON_ID: LazyLock<widget::Id> =
     LazyLock::new(|| widget::Id::new("permanent-delete-button"));
 
@@ -4056,6 +4060,19 @@ impl Application for App {
             }
             Message::SearchInput(input) => {
                 self.search_focused = true;
+                // Don't re-run a search that's already active with the exact same term.
+                // This prevents double-firing from on_input + on_paste both triggering.
+                if self.search_get() == Some(input.as_str()) {
+                    return Task::none();
+                }
+                // Don't trigger a search until the term is long enough to be useful.
+                // If the term is shortened back below the minimum, cancel any active search.
+                if input.len() < SEARCH_MIN_LEN {
+                    if self.search_get().is_some() {
+                        return self.search_set_active(None);
+                    }
+                    return Task::none();
+                }
                 return self.search_set_active(Some(input));
             }
             Message::SetShowDetails(show_details) => {

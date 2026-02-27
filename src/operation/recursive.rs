@@ -1,14 +1,13 @@
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf};
 use compio::io::{AsyncReadAt, AsyncWriteAt};
-use futures::{StreamExt, stream};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Instant;
 use std::{cell::Cell, error::Error, fs, ops::ControlFlow, path::PathBuf, rc::Rc};
 use walkdir::WalkDir;
 
-use crate::operation::{OperationError, sync_to_disk};
+use crate::operation::OperationError;
 
 use super::{Controller, OperationSelection, ReplaceResult, copy_unique_path};
 
@@ -203,21 +202,7 @@ impl Context {
             }
         }
 
-        // Sync files to disk
-        let file_stream = stream::iter(written_files.into_iter().map(|path| async move {
-            if let Ok(file) = compio::fs::OpenOptions::new().write(true).open(&path).await {
-                let _ = file.sync_all().await;
-            }
-        }));
-        file_stream.buffer_unordered(32).collect::<Vec<_>>().await;
-
-        // Sync directories to disk
-        let dir_stream = stream::iter(target_dirs.into_iter().map(|path| async move {
-            if let Ok(dir) = compio::fs::OpenOptions::new().read(true).open(&path).await {
-                let _ = dir.sync_all().await;
-            }
-        }));
-        dir_stream.buffer_unordered(16).collect::<Vec<_>>().await;
+        crate::operation::sync_to_disk(written_files, target_dirs).await;
 
         Ok(true)
     }
@@ -416,14 +401,10 @@ impl Op {
                 }
 
                 let mut times = fs::FileTimes::new();
-                {
-                    use std::os::unix::prelude::MetadataExt;
-                    log::info!("{}", metadata.mtime());
-                }
-                if let Ok(time) = dbg!(metadata.modified()) {
+                if let Ok(time) = metadata.modified() {
                     times = times.set_modified(time);
                 }
-                if let Ok(time) = dbg!(metadata.accessed()) {
+                if let Ok(time) = metadata.accessed() {
                     times = times.set_accessed(time);
                 }
                 //TODO: upstream set_times implementation to compio?

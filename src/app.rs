@@ -3210,11 +3210,10 @@ impl Application for App {
                                     }
                                 }
                                 TypeToSearch::SelectByPrefix => {
-                                    // Fall back to recursive search
-                                    let mut term =
-                                        self.search_get().unwrap_or_default().to_string();
-                                    term.push_str(&text);
-                                    return self.search_set_active(Some(term));
+                                    return self.update(Message::TabMessage(
+                                        Some(entity),
+                                        tab::Message::SelectByPrefix(text.to_string()),
+                                    ));
                                 }
                             }
                         }

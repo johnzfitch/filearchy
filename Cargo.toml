@@ -74,6 +74,7 @@ num_cpus = "1.17.0"
 # Patched to fix mtime: https://github.com/compio-rs/compio/pull/625
 # version = "0.17.0"
 git = "https://github.com/jackpot51/compio.git"
+rev = "8235a1fcccde233362bb76df45b509c12ca79972"
 default-features = false
 features = ["fs", "io", "macros", "polling", "runtime"]
 
@@ -83,7 +84,8 @@ default-features = false
 optional = true
 
 [dependencies.libcosmic]
-git = "https://github.com/pop-os/libcosmic.git"
+git = "https://github.com/johnzfitch/libcosmic.git"
+rev = "bcc1e90ae787c87c16d221a700453cb689e352d6"
 default-features = false
 #TODO: a11y feature crashes
 features = ["about", "autosize", "multi-window", "tokio", "winit", "surface-message"]

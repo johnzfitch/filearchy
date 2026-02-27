@@ -1691,6 +1691,7 @@ pub enum Message {
     SearchContext(Location, SearchContextWrapper),
     SearchReady(bool),
     SelectAll,
+    SelectByPrefix(String),
     SelectFirst,
     SelectLast,
     SetOpenWith(Mime, String),
@@ -4011,6 +4012,34 @@ impl Tab {
                     commands.push(Command::Iced(
                         widget::button::focus(widget::Id::unique()).into(),
                     ));
+                }
+            }
+            Message::SelectByPrefix(prefix) => {
+                let prefix_lower = prefix.to_lowercase();
+                if let Some(ref items) = self.items_opt {
+                    if let Some(pos) = items
+                        .iter()
+                        .filter_map(|item| {
+                            if item.name.to_lowercase().starts_with(&prefix_lower) {
+                                item.pos_opt.get()
+                            } else {
+                                None
+                            }
+                        })
+                        .next()
+                    {
+                        if self.select_position(pos.0, pos.1, false) {
+                            if let Some(offset) = self.select_focus_scroll() {
+                                commands.push(Command::Iced(
+                                    scrollable::scroll_to(self.scrollable_id.clone(), offset)
+                                        .into(),
+                                ));
+                            }
+                            if let Some(id) = self.select_focus_id() {
+                                commands.push(Command::Iced(widget::button::focus(id).into()));
+                            }
+                        }
+                    }
                 }
             }
             Message::SelectFirst => {

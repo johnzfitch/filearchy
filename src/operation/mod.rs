@@ -196,15 +196,15 @@ async fn copy_or_move(
     .map_err(wrap_compio_spawn_error)?
 }
 
-pub async fn sync_to_disk(
+pub(crate) async fn sync_to_disk(
     written_files: Vec<PathBuf>,
     target_dirs: std::collections::HashSet<PathBuf>,
 ) {
     use futures::{StreamExt, stream};
 
-    // Sync files to disk
+    // Sync files to disk (open read-only to avoid failing on read-only files)
     let file_stream = stream::iter(written_files.into_iter().map(|path| async move {
-        if let Ok(file) = compio::fs::OpenOptions::new().write(true).open(&path).await {
+        if let Ok(file) = compio::fs::OpenOptions::new().read(true).open(&path).await {
             let _ = file.sync_all().await;
         }
     }));

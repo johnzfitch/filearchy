@@ -924,7 +924,32 @@ impl App {
         P: std::fmt::Debug + AsRef<Path> + AsRef<std::ffi::OsStr>,
     {
         for app in self.mime_app_cache.get(mime) {
-            let Some(commands) = app.command(paths) else {
+            // Terminal apps (e.g. neovim, nano) need a terminal emulator wrapper.
+            // spawn_detached redirects stdio to null, so running them directly silently fails.
+            let Some(commands) = (if app.terminal {
+                let Some(terminal) = self.mime_app_cache.terminal() else {
+                    log::warn!(
+                        "no terminal emulator found; cannot launch terminal app {:?}",
+                        app.id
+                    );
+                    continue;
+                };
+                let (Some(term_exec), Some(app_exec)) =
+                    (terminal.exec.as_deref(), app.exec.as_deref())
+                else {
+                    log::warn!(
+                        "missing exec for terminal {:?} or app {:?}",
+                        terminal.id,
+                        app.id
+                    );
+                    continue;
+                };
+                // Wrap as "<terminal> -- <app_exec>" so field codes (%f etc) still expand
+                let wrapped = format!("{term_exec} -- {app_exec}");
+                mime_app::exec_to_command(&wrapped, paths)
+            } else {
+                app.command(paths)
+            }) else {
                 continue;
             };
             let len = commands.len();
@@ -2926,9 +2951,20 @@ impl Application for App {
                             let available_apps = self.get_apps_for_mime(&mime);
 
                             if let Some((app, _)) = available_apps.get(selected) {
-                                if let Some(mut command) =
+                                let command_opt = if app.terminal {
+                                    self.mime_app_cache.terminal().and_then(|term| {
+                                        let wrapped = format!(
+                                            "{} -- {}",
+                                            term.exec.as_deref().unwrap_or_default(),
+                                            app.exec.as_deref().unwrap_or_default()
+                                        );
+                                        mime_app::exec_to_command(&wrapped, &[&path])
+                                            .and_then(|v| v.into_iter().next())
+                                    })
+                                } else {
                                     app.command(&[&path]).and_then(|v| v.into_iter().next())
-                                {
+                                };
+                                if let Some(mut command) = command_opt {
                                     match spawn_detached(&mut command) {
                                         Ok(()) => {
                                             let _ = recently_used_xbel::update_recently_used(

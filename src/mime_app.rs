@@ -174,6 +174,8 @@ pub struct MimeApp {
     pub exec: Option<String>,
     pub icon: widget::icon::Handle,
     pub is_default: bool,
+    /// True if the app requires a terminal emulator to run (Desktop Entry `Terminal=true`).
+    pub terminal: bool,
 }
 
 impl MimeApp {
@@ -205,6 +207,7 @@ impl From<&desktop::DesktopEntryData> for MimeApp {
                 desktop::fde::IconSource::Path(path) => widget::icon::from_path(path.clone()),
             },
             is_default: false,
+            terminal: app.terminal,
         }
     }
 }

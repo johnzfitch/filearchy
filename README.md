@@ -1,29 +1,54 @@
-# cosmic-files
-File manager for the COSMIC desktop environment
+# filearchy
 
-> [!NOTE]
-> This project is still a work in progress
+A file manager for Wayland — forked from [cosmic-files](https://github.com/pop-os/cosmic-files) with custom features for omarchy/Hyprland workflows.
 
-## Build the project from source
+## Features (fork additions)
+
+- **Custom MIME icons** — per-type icons for source files, documents, media, and more
+- **Extended archive support** — compress/extract `.tar.bz2`, `.tar.lz4`, `.tar.xz`, `.tar.zst` in addition to `.tgz` and `.zip`
+- **Terminal app support** — files with `Terminal=true` in their `.desktop` entry (e.g. neovim, vim, nano) open inside the configured terminal emulator
+- **omarchy clipboard keybinds** — Super+C/V/X and Ctrl/Shift+Insert work in the file list and location bar
+- **Location bar focus tracking** — real `on_focus`/`on_unfocus` state; typing in the bar extends the path without erasing it
+- **Search stability** — minimum 2-char search term, deduplication, no rescans on filesystem events while searching
+- **Search context menu** — right-click actions available on search results
+- **List view default** — opens in list view; `pkill -9 filearchy` works
+
+## Build
 
 ```sh
-# Clone the project using `git`
-git clone https://github.com/pop-os/cosmic-files
-# Change to the directory that was created by `git`
-cd cosmic-files
-# Build an optimized version using `cargo`, this may take a while
+git clone https://github.com/pop-os/cosmic-files filearchy
+cd filearchy
 cargo build --release
-# Run the optimized version using `cargo`
-cargo run --release
+# Binary: target/release/filearchy
 ```
 
-## Community and Contributing
+### Dev workflow
 
-The COSMIC desktop environment is maintained by System76 for use in Pop!_OS. A list of all COSMIC projects can be found in the
-[cosmic-epoch](https://github.com/pop-os/cosmic-epoch) project's README. If you would like to discuss COSMIC and Pop!_OS, please
-consider joining the [Pop!_OS Chat](https://chat.pop-os.org/). More information and links can be found on the
-[Pop!_OS Website](https://pop.system76.com).
+```sh
+just run        # build release + run with debug logs (foreground)
+just dev        # cargo fmt + just run
+```
+
+## Install (symlink-based)
+
+```sh
+# Wrapper script at ~/.local/bin/filearchy pointing to target/release/filearchy
+# Hyprland keybind: bindd = SUPER, F, File manager, exec, uwsm-app -- ~/.local/bin/filearchy
+```
+
+## Process management
+
+```sh
+pkill -9 filearchy          # kill all instances
+systemctl --user list-units --state=active | grep filearchy   # list scope units
+```
+
+Because the app uses `exit_on_close`, processes persist after windows are closed. Press Super+F repeatedly and multiple instances accumulate — kill them periodically or restart the session.
+
+## Upstream
+
+This is a fork of [pop-os/cosmic-files](https://github.com/pop-os/cosmic-files), the file manager for the [COSMIC desktop](https://github.com/pop-os/cosmic-epoch). Upstream changes are periodically rebased in.
 
 ## License
 
-This project is licensed under [GPLv3](LICENSE)
+GPL-3.0-only — see [LICENSE](LICENSE)

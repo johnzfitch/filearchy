@@ -19,4 +19,7 @@ jobs:
       - run: rustup update stable && rustup default stable
       - run: cargo test --verbose --no-default-features
       - run: cargo test --verbose
-      - run: cargo test --verbose --all-features
+      # io-uring-bindgen regenerates bindings via bindgen against local kernel
+      # headers; CI runners have older kernels that lack newer io_uring symbols,
+      # so we test all features except that one.
+      - run: cargo test --verbose --features bzip2,dbus-config,desktop,gvfs,io-uring,jemalloc,lz4,lzma-rust2,notify,wgpu,wayland,zstd

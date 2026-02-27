@@ -1662,6 +1662,8 @@ pub enum Message {
     EditLocation(Option<EditLocation>),
     EditLocationComplete(usize),
     EditLocationEnable,
+    EditLocationFocus(bool),
+    EditLocationPaste(String),
     EditLocationSubmit,
     OpenInNewTab(PathBuf),
     EmptyTrash,
@@ -2593,6 +2595,7 @@ pub struct Tab {
     pub item_view_size_opt: Cell<Option<Size>>,
     pub edit_location: Option<EditLocation>,
     pub edit_location_id: widget::Id,
+    pub location_focused: bool,
     pub history_i: usize,
     pub history: Vec<Location>,
     pub config: TabConfig,
@@ -2714,6 +2717,7 @@ impl Tab {
             item_view_size_opt: Cell::new(None),
             edit_location: None,
             edit_location_id: widget::Id::unique(),
+            location_focused: false,
             history_i: 0,
             history,
             config,
@@ -3105,6 +3109,7 @@ impl Tab {
         self.location_ancestors = self.location.ancestors();
         self.location_title = self.location.title();
         self.context_menu = None;
+        // Clear edit mode on navigation; bar displays self.location when None
         self.edit_location = None;
         self.items_opt = None;
         //TODO: remember scroll by location?
@@ -3468,15 +3473,18 @@ impl Tab {
                 }
             }
             Message::EditLocation(edit_location) => {
-                self.edit_location = edit_location;
-                if self.edit_location.is_some() {
-                    commands.push(Command::Iced(
-                        widget::text_input::focus(self.edit_location_id.clone()).into(),
-                    ));
+                if let Some(el) = edit_location {
+                    self.edit_location = Some(el);
+                } else {
+                    // None means "cancel edit" — clear edit mode, bar shows self.location
+                    self.edit_location = None;
                 }
+                commands.push(Command::Iced(
+                    widget::text_input::focus(self.edit_location_id.clone()).into(),
+                ));
             }
             Message::EditLocationComplete(selected) => {
-                if let Some(mut edit_location) = self.edit_location.take() {
+                if let Some(edit_location) = &mut self.edit_location {
                     if !matches!(edit_location.location, Location::Network(..)) {
                         edit_location.selected = Some(selected);
                         cd = edit_location.resolve();
@@ -3484,14 +3492,45 @@ impl Tab {
                 }
             }
             Message::EditLocationEnable => {
+                self.location_focused = true;
+                if self.edit_location.is_none() {
+                    self.edit_location = Some(self.location.clone().into());
+                }
                 commands.push(Command::Iced(
                     widget::text_input::focus(self.edit_location_id.clone()).into(),
                 ));
-                self.edit_location = Some(self.location.clone().into());
+            }
+            Message::EditLocationFocus(focused) => {
+                self.location_focused = focused;
+                if focused {
+                    if self.edit_location.is_none() {
+                        self.edit_location = Some(self.location.clone().into());
+                    }
+                } else {
+                    self.edit_location = None;
+                }
+            }
+            Message::EditLocationPaste(text) => {
+                // Paste into location bar. join() handles both cases:
+                //   absolute path  → replaces current dir entirely
+                //   relative path  → appended to current dir
+                let is_network = matches!(self.location, Location::Network(..));
+                let new_loc = if is_network {
+                    self.location.with_uri(text)
+                } else if let Some(base) = self.location.path_opt() {
+                    self.location.with_path(base.join(text))
+                } else {
+                    Location::Path(PathBuf::from(text))
+                };
+                self.edit_location = Some(new_loc.into());
+                commands.push(Command::Iced(
+                    widget::text_input::focus(self.edit_location_id.clone()).into(),
+                ));
             }
             Message::EditLocationSubmit => {
-                if let Some(edit_location) = self.edit_location.take() {
+                if let Some(edit_location) = &self.edit_location {
                     cd = edit_location.resolve();
+                    // edit_location stays set; change_location will update it to new path
                 }
             }
             Message::OpenInNewTab(path) => {
@@ -4619,7 +4658,6 @@ impl Tab {
         let mut row = widget::row::with_capacity(6)
             .align_y(Alignment::Center)
             .padding([space_xxxs, 0]);
-        let mut w = 0.0;
 
         // Grid/List view toggle button
         let (view_icon, next_view_action) = match self.config.view {
@@ -4632,7 +4670,6 @@ impl Tab {
                 .padding(space_xxs)
                 .class(theme::Button::Icon);
         row = row.push(view_button);
-        w += f32::from(space_xxs).mul_add(2.0, 16.0);
 
         let mut prev_button =
             widget::button::custom(widget::icon::from_name("go-previous-symbolic").size(16))
@@ -4642,7 +4679,6 @@ impl Tab {
             prev_button = prev_button.on_press(Message::GoPrevious);
         }
         row = row.push(prev_button);
-        w += f32::from(space_xxs).mul_add(2.0, 16.0);
 
         let mut next_button =
             widget::button::custom(widget::icon::from_name("go-next-symbolic").size(16))
@@ -4652,10 +4688,8 @@ impl Tab {
             next_button = next_button.on_press(Message::GoNext);
         }
         row = row.push(next_button);
-        w += f32::from(space_xxs).mul_add(2.0, 16.0);
 
         row = row.push(widget::Space::with_width(Length::Fixed(space_s.into())));
-        w += f32::from(space_s);
 
         //TODO: allow resizing?
         let name_width = 300.0;
@@ -4716,97 +4750,109 @@ impl Tab {
         let heading_rule = widget::container(horizontal_rule(1))
             .padding([0, theme::active().cosmic().corner_radii.radius_xs[0] as u16]);
 
-        if let Some(edit_location) = &self.edit_location {
-            let mut text_input = None;
+        // Location bar is always visible as a text input (never collapsed to breadcrumbs).
+        // When edit_location is Some the user is actively editing (autocomplete active);
+        // when None it shows the current path and entering any character enters edit mode.
+        {
+            // Determine what string to display and which base location to use for on_input
+            let (display_str, base_location) = if let Some(el) = &self.edit_location {
+                let s = if let Location::Network(ref uri, ..) = el.location {
+                    uri.clone()
+                } else {
+                    el.resolve()
+                        .as_ref()
+                        .and_then(|l| l.path_opt())
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| {
+                            self.location
+                                .path_opt()
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        })
+                };
+                (s, el.location.clone())
+            } else {
+                let s = self.location
+                    .path_opt()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| self.location.to_string());
+                (s, self.location.clone())
+            };
 
-            //TODO: allow editing other locations
-            if let Location::Network(ref uri, ..) = edit_location.location {
-                let location = edit_location.location.clone();
-                text_input = Some(
-                    widget::text_input("", uri.clone())
-                        .id(self.edit_location_id.clone())
-                        .on_input(move |input| {
-                            Message::EditLocation(Some(location.with_uri(input).into()))
-                        })
-                        .on_submit(|_| Message::EditLocationSubmit)
-                        .line_height(1.0),
-                );
-            } else if let Some(resolved_location) = edit_location.resolve()
-                && let Some(path) = resolved_location.path_opt().cloned()
-            {
-                text_input = Some(
-                    widget::text_input("", path.to_string_lossy().into_owned())
-                        .id(self.edit_location_id.clone())
-                        .on_input(move |input| {
-                            Message::EditLocation(Some(
-                                resolved_location.with_path(PathBuf::from(input)).into(),
-                            ))
-                        })
-                        .on_submit(|_| Message::EditLocationSubmit)
-                        .line_height(1.0),
-                );
-            }
-            if let Some(text_input) = text_input {
-                row = row.push(
-                    widget::button::custom(
-                        widget::icon::from_name("window-close-symbolic").size(16),
-                    )
-                    .on_press(Message::EditLocation(None))
-                    .padding(space_xxs)
-                    .class(theme::Button::Icon),
-                );
-                let mut popover =
-                    widget::popover(text_input).position(widget::popover::Position::Bottom);
-                if let Some(completions) = &edit_location.completions {
-                    if !completions.is_empty() {
-                        let mut column =
-                            widget::column::with_capacity(completions.len()).padding(space_xxs);
-                        for (i, (name, _path)) in completions.iter().enumerate() {
-                            let selected = edit_location.selected == Some(i);
-                            column = column.push(
-                                widget::button::custom(widget::text::body(name))
-                                    //TODO: match to design
-                                    .class(if selected {
-                                        theme::Button::Standard
-                                    } else {
-                                        theme::Button::HeaderBar
-                                    })
-                                    .on_press(Message::EditLocationComplete(i))
-                                    .padding(space_xxs)
-                                    .width(Length::Fill),
-                            );
-                        }
-                        popover = popover.popup(
-                            widget::container(column)
-                                .class(theme::Container::Dropdown)
-                                //TODO: This is a hack to get the popover to be the right width
-                                .max_width(size.width - 140.0),
+            let is_network = matches!(base_location, Location::Network(..));
+            let has_path = base_location.path_opt().is_some();
+            let base_location2 = base_location.clone();
+            let text_input = widget::text_input("", display_str)
+                .id(self.edit_location_id.clone())
+                .on_focus(Message::EditLocationFocus(true))
+                .on_unfocus(Message::EditLocationFocus(false))
+                .select_on_focus(true)
+                .on_input(move |input| {
+                    let new_loc = if is_network {
+                        base_location.with_uri(input)
+                    } else if has_path {
+                        base_location.with_path(PathBuf::from(input))
+                    } else {
+                        // Trash/Recents/etc — allow typing a fresh filesystem path
+                        Location::Path(PathBuf::from(input))
+                    };
+                    Message::EditLocation(Some(new_loc.into()))
+                })
+                .on_paste(move |input| {
+                    let new_loc = if is_network {
+                        base_location2.with_uri(input)
+                    } else if has_path {
+                        base_location2.with_path(PathBuf::from(input))
+                    } else {
+                        Location::Path(PathBuf::from(input))
+                    };
+                    Message::EditLocation(Some(new_loc.into()))
+                })
+                .on_submit(|_| Message::EditLocationSubmit)
+                .line_height(1.0);
+
+            let mut popover =
+                widget::popover(text_input).position(widget::popover::Position::Bottom);
+            if let Some(completions) = self.edit_location.as_ref().and_then(|el| el.completions.as_ref()) {
+                if !completions.is_empty() {
+                    let mut column =
+                        widget::column::with_capacity(completions.len()).padding(space_xxs);
+                    let selected_i = self.edit_location.as_ref().and_then(|el| el.selected);
+                    for (i, (name, _path)) in completions.iter().enumerate() {
+                        let selected = selected_i == Some(i);
+                        column = column.push(
+                            widget::button::custom(widget::text::body(name))
+                                .class(if selected {
+                                    theme::Button::Standard
+                                } else {
+                                    theme::Button::HeaderBar
+                                })
+                                .on_press(Message::EditLocationComplete(i))
+                                .padding(space_xxs)
+                                .width(Length::Fill),
                         );
                     }
+                    popover = popover.popup(
+                        widget::container(column)
+                            .class(theme::Container::Dropdown)
+                            .max_width(size.width - 140.0),
+                    );
                 }
-                row = row.push(popover);
-                let mut column = widget::column::with_capacity(4).padding([0, space_s]);
-                column = column.push(row);
-                column = column.push(accent_rule);
-                if self.config.view == View::List && !condensed {
-                    column = column.push(heading_row);
-                    column = column.push(heading_rule);
-                }
-                return column.into();
             }
-        } else if let Some(path) = self.location.path_opt() {
-            row = row.push(
-                crate::mouse_area::MouseArea::new(
-                    widget::button::custom(widget::icon::from_name("edit-symbolic").size(16))
-                        .padding(space_xxs)
-                        .class(theme::Button::Icon)
-                        .on_press(Message::EditLocation(Some(self.location.clone().into()))),
-                )
-                .on_middle_press(move |_| Message::OpenInNewTab(path.clone())),
-            );
-            w += f32::from(space_xxs).mul_add(2.0, 16.0);
+            row = row.push(popover);
+            let mut column = widget::column::with_capacity(4).padding([0, space_s]);
+            column = column.push(row);
+            column = column.push(accent_rule);
+            if self.config.view == View::List && !condensed {
+                column = column.push(heading_row);
+                column = column.push(heading_rule);
+            }
+            return column.into();
         }
 
+        // Breadcrumb fallback — never reached (always-open bar returns above).
+        #[allow(unused_variables, unused_assignments)]
+        let mut w = 0.0f32;
         let mut children: Vec<Element<_>> = Vec::new();
         match &self.location {
             Location::Desktop(path, ..) | Location::Path(path) | Location::Search(path, ..) => {

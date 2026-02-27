@@ -64,10 +64,10 @@ dev *args:
     cargo fmt
     just run {{args}}
 
-# Run with debug logs
+# Run with debug logs (--no-daemon keeps process in foreground so logs reach the terminal)
 run *args:
     cargo build --release
-    env RUST_LOG=cosmic_files=debug RUST_BACKTRACE=full {{bin-src}} {{args}}
+    env RUST_LOG=cosmic_files=debug RUST_BACKTRACE=full {{bin-src}} --no-daemon {{args}}
 
 # Run tests
 test *args:

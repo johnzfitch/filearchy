@@ -27,13 +27,23 @@ pub const SUPPORTED_ARCHIVE_TYPES: &[&str] = &[
     "application/x-xz",
     #[cfg(feature = "lzma-rust2")]
     "application/x-xz-compressed-tar",
+    #[cfg(feature = "zstd")]
+    "application/zstd",
+    #[cfg(feature = "zstd")]
+    "application/x-zstd-compressed-tar",
+    #[cfg(feature = "lz4")]
+    "application/x-lz4",
+    #[cfg(feature = "lz4")]
+    "application/x-lz4-compressed-tar",
 ];
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     ".tar.bz2",
     ".tar.gz",
     ".tar.lzma",
+    ".tar.lz4",
     ".tar.xz",
+    ".tar.zst",
     ".tgz",
     ".tar",
     ".zip",
@@ -93,6 +103,27 @@ pub fn extract(
                 .map(tar::Archive::new)
                 .and_then(|mut archive| archive.unpack(new_dir))
                 .map_err(|e| OperationError::from_err(e, controller))?;
+        }
+        #[cfg(feature = "zstd")]
+        "application/zstd" | "application/x-zstd-compressed-tar" => {
+            let reader = OpReader::new(path, controller.clone())
+                .map(io::BufReader::new)
+                .map_err(|e| OperationError::from_err(e, &controller))?;
+            let decoder = zstd::stream::read::Decoder::new(reader)
+                .map_err(|e| OperationError::from_err(e, &controller))?;
+            tar::Archive::new(decoder)
+                .unpack(new_dir)
+                .map_err(|e| OperationError::from_err(e, &controller))?;
+        }
+        #[cfg(feature = "lz4")]
+        "application/x-lz4" | "application/x-lz4-compressed-tar" => {
+            let reader = OpReader::new(path, controller.clone())
+                .map(io::BufReader::new)
+                .map_err(|e| OperationError::from_err(e, &controller))?;
+            let decoder = lz4_flex::frame::FrameDecoder::new(reader);
+            tar::Archive::new(decoder)
+                .unpack(new_dir)
+                .map_err(|e| OperationError::from_err(e, &controller))?;
         }
         _ => Err(OperationError::from_err(
             format!("unsupported mime type {mime:?}"),

@@ -74,6 +74,13 @@ pub fn key_binds(mode: &tab::Mode) -> HashMap<KeyBind, Action> {
         bind!([Shift], Key::Named(Named::Enter), OpenInNewWindow);
         bind!([Ctrl], Key::Character("v".into()), Paste);
         bind!([], Key::Named(Named::F2), Rename);
+        // Super clipboard shortcuts for WM keybind compatibility (omarchy/Hyprland)
+        bind!([Super], Key::Character("c".into()), Copy);
+        bind!([Super], Key::Character("x".into()), Cut);
+        bind!([Super], Key::Character("v".into()), Paste);
+        // Traditional CUA clipboard shortcuts (Ctrl+Insert, Shift+Insert)
+        bind!([Ctrl], Key::Named(Named::Insert), Copy);
+        bind!([Shift], Key::Named(Named::Insert), Paste);
     }
 
     // App and dialog only keys

@@ -224,7 +224,9 @@ pub fn context_menu<'a>(
 
                 //TODO: Print?
                 children.push(menu_item(fl!("show-details"), Action::Preview).into());
-                if matches!(tab.mode, tab::Mode::App) {
+                // Only show "Add to sidebar" when all selected items are directories
+                if matches!(tab.mode, tab::Mode::App) && selected == selected_dir && selected_dir > 0
+                {
                     children.push(divider::horizontal::light().into());
                     children.push(menu_item(fl!("add-to-sidebar"), Action::AddToSidebar).into());
                 }
@@ -523,6 +525,7 @@ pub fn dialog_menu(
     .item_height(ItemHeight::Dynamic(40))
     .item_width(ItemWidth::Uniform(360))
     .spacing(theme::active().cosmic().spacing.space_xxxs.into())
+    .bounds_expand(40)
     .into()
 }
 
@@ -573,6 +576,7 @@ pub fn menu_bar<'a>(
         .item_height(ItemHeight::Dynamic(40))
         .item_width(ItemWidth::Uniform(360))
         .spacing(theme::active().cosmic().spacing.space_xxxs.into())
+        .bounds_expand(40)
         .into_element(
             core,
             key_binds,
@@ -605,7 +609,7 @@ pub fn menu_bar<'a>(
                         menu_button_optional(
                             fl!("add-to-sidebar"),
                             Action::AddToSidebar,
-                            selected > 0,
+                            selected_dir > 0,
                         ),
                         menu::Item::Divider,
                         menu_button_optional(

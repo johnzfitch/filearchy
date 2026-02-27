@@ -673,7 +673,99 @@ impl Operation {
                             }
                         }
 
+                        // Helper: append all paths to a tar::Builder
+                        macro_rules! tar_append {
+                            ($archive:expr) => {{
+                                let total_paths = paths.len();
+                                for (i, path) in paths.iter().enumerate() {
+                                    futures::executor::block_on(async {
+                                        controller.check().await.map_err(|e| {
+                                            OperationError::from_state(e, &controller)
+                                        })
+                                    })?;
+                                    controller.set_progress((i as f32) / total_paths as f32);
+                                    if let Some(relative_path) = path
+                                        .strip_prefix(relative_root)
+                                        .map_err(|e| OperationError::from_err(e, &controller))?
+                                        .to_str()
+                                    {
+                                        $archive
+                                            .append_path_with_name(path, relative_path)
+                                            .map_err(|e| {
+                                                OperationError::from_err(e, &controller)
+                                            })?;
+                                    }
+                                }
+                                $archive
+                                    .finish()
+                                    .map_err(|e| OperationError::from_err(e, &controller))?;
+                            }};
+                        }
+
                         match archive_type {
+                            #[cfg(feature = "bzip2")]
+                            ArchiveType::TarBz2 => {
+                                let mut archive = fs::File::create(&to)
+                                    .map(io::BufWriter::new)
+                                    .map(|w| bzip2::write::BzEncoder::new(w, bzip2::Compression::best()))
+                                    .map(tar::Builder::new)
+                                    .map_err(|e| OperationError::from_err(e, &controller))?;
+                                tar_append!(archive);
+                            }
+                            #[cfg(feature = "lz4")]
+                            ArchiveType::TarLz4 => {
+                                let file = fs::File::create(&to)
+                                    .map(io::BufWriter::new)
+                                    .map_err(|e| OperationError::from_err(e, &controller))?;
+                                let enc = lz4_flex::frame::FrameEncoder::new(file);
+                                let mut archive = tar::Builder::new(enc);
+                                tar_append!(archive);
+                                // FrameEncoder is in the finished tar builder; drop flushes it
+                            }
+                            #[cfg(feature = "lzma-rust2")]
+                            ArchiveType::TarXz => {
+                                let file = fs::File::create(&to)
+                                    .map(io::BufWriter::new)
+                                    .map_err(|e| OperationError::from_err(e, &controller))?;
+                                let xz = lzma_rust2::XzWriter::new(file, lzma_rust2::XzOptions::default())
+                                    .map_err(|e| OperationError::from_err(e, &controller))?;
+                                let mut archive = tar::Builder::new(xz);
+                                let total_paths = paths.len();
+                                for (i, path) in paths.iter().enumerate() {
+                                    futures::executor::block_on(async {
+                                        controller.check().await.map_err(|e| {
+                                            OperationError::from_state(e, &controller)
+                                        })
+                                    })?;
+                                    controller.set_progress((i as f32) / total_paths as f32);
+                                    if let Some(relative_path) = path
+                                        .strip_prefix(relative_root)
+                                        .map_err(|e| OperationError::from_err(e, &controller))?
+                                        .to_str()
+                                    {
+                                        archive
+                                            .append_path_with_name(path, relative_path)
+                                            .map_err(|e| OperationError::from_err(e, &controller))?;
+                                    }
+                                }
+                                // Finish tar stream, get inner XzWriter, then finalize xz stream
+                                let xz = archive
+                                    .into_inner()
+                                    .map_err(|e| OperationError::from_err(e, &controller))?;
+                                xz.finish()
+                                    .map_err(|e| OperationError::from_err(e, &controller))?;
+                            }
+                            #[cfg(feature = "zstd")]
+                            ArchiveType::TarZst => {
+                                let file = fs::File::create(&to)
+                                    .map(io::BufWriter::new)
+                                    .map_err(|e| OperationError::from_err(e, &controller))?;
+                                let zst = zstd::stream::write::Encoder::new(file, 0)
+                                    .map_err(|e| OperationError::from_err(e, &controller))?
+                                    .auto_finish();
+                                let mut archive = tar::Builder::new(zst);
+                                tar_append!(archive);
+                            }
                             ArchiveType::Tgz => {
                                 let mut archive = fs::File::create(&to)
                                     .map(io::BufWriter::new)

@@ -418,6 +418,7 @@ pub enum Message {
     ScrollTab(i16),
     SearchActivate,
     SearchClear,
+    SearchFocus(bool),
     SearchInput(String),
     SetShowDetails(bool),
     SetTypeToSearch(TypeToSearch),
@@ -480,18 +481,45 @@ pub enum ContextPage {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ArchiveType {
+    #[cfg(feature = "bzip2")]
+    TarBz2,
+    #[cfg(feature = "lz4")]
+    TarLz4,
+    #[cfg(feature = "lzma-rust2")]
+    TarXz,
+    #[cfg(feature = "zstd")]
+    TarZst,
     Tgz,
     #[default]
     Zip,
 }
 
 impl ArchiveType {
-    pub const fn all() -> &'static [Self] {
-        &[Self::Tgz, Self::Zip]
+    pub fn all() -> &'static [Self] {
+        &[
+            #[cfg(feature = "bzip2")]
+            Self::TarBz2,
+            #[cfg(feature = "lz4")]
+            Self::TarLz4,
+            #[cfg(feature = "lzma-rust2")]
+            Self::TarXz,
+            #[cfg(feature = "zstd")]
+            Self::TarZst,
+            Self::Tgz,
+            Self::Zip,
+        ]
     }
 
     pub const fn extension(&self) -> &str {
         match self {
+            #[cfg(feature = "bzip2")]
+            Self::TarBz2 => ".tar.bz2",
+            #[cfg(feature = "lz4")]
+            Self::TarLz4 => ".tar.lz4",
+            #[cfg(feature = "lzma-rust2")]
+            Self::TarXz => ".tar.xz",
+            #[cfg(feature = "zstd")]
+            Self::TarZst => ".tar.zst",
             Self::Tgz => ".tgz",
             Self::Zip => ".zip",
         }
@@ -730,6 +758,7 @@ pub struct App {
     failed_operations: BTreeMap<u64, (Operation, Controller, String)>,
     scrollable_id: widget::Id,
     search_id: widget::Id,
+    search_focused: bool,
     size: Option<Size>,
     #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
     layer_sizes: FxHashMap<window::Id, Size>,
@@ -2221,6 +2250,7 @@ impl Application for App {
             failed_operations: BTreeMap::new(),
             scrollable_id: widget::Id::new("File Scrollable"),
             search_id: widget::Id::new("File Search"),
+            search_focused: false,
             size: None,
             #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
             surface_ids: FxHashMap::default(),
@@ -2540,6 +2570,7 @@ impl Application for App {
             }
 
             if tab.edit_location.is_some() {
+                // Cancel edit, bar resets to current location
                 tab.edit_location = None;
                 return Task::none();
             }
@@ -3026,8 +3057,8 @@ impl Application for App {
                     let editing_location = self
                         .tab_model
                         .data::<Tab>(entity)
-                        .is_some_and(|tab| tab.edit_location.is_some());
-                    let editing_search = self.search_get().is_some();
+                        .is_some_and(|tab| tab.location_focused);
+                    let editing_search = self.search_focused;
                     let dialog_open = self.dialog_pages.front().is_some();
                     let editing_text_input = editing_location || editing_search || dialog_open;
                     let is_insert = matches!(
@@ -3035,9 +3066,49 @@ impl Application for App {
                         Key::Named(cosmic::iced::keyboard::key::Named::Insert)
                     );
 
-                    // Shift+Insert in a text input: let the widget handle it as text paste
                     if is_insert && editing_text_input {
                         if modifiers.shift() && !modifiers.control() {
+                            // Shift+Insert: widget doesn't handle this — manually paste clipboard
+                            if editing_search {
+                                return clipboard::read().map(|opt| {
+                                    cosmic::action::app(Message::SearchInput(
+                                        opt.unwrap_or_default(),
+                                    ))
+                                });
+                            } else if editing_location {
+                                return clipboard::read().map(move |opt| {
+                                    cosmic::action::app(Message::TabMessage(
+                                        Some(entity),
+                                        tab::Message::EditLocationPaste(opt.unwrap_or_default()),
+                                    ))
+                                });
+                            }
+                            return Task::none();
+                        }
+                        if modifiers.control() && !modifiers.shift() {
+                            // Ctrl+Insert: copy current text input content to clipboard
+                            if editing_location {
+                                if let Some(tab) = self.tab_model.data::<Tab>(entity) {
+                                    let text = tab.edit_location.as_ref()
+                                        .map(|el| match &el.location {
+                                            Location::Network(uri, ..) => uri.clone(),
+                                            loc => loc.path_opt()
+                                                .map(|p| p.to_string_lossy().into_owned())
+                                                .unwrap_or_default(),
+                                        })
+                                        .or_else(|| tab.location.path_opt()
+                                            .map(|p| p.to_string_lossy().into_owned()))
+                                        .unwrap_or_default();
+                                    if !text.is_empty() {
+                                        return clipboard::write(text);
+                                    }
+                                }
+                            } else if editing_search {
+                                let text = self.search_get().unwrap_or_default().to_string();
+                                if !text.is_empty() {
+                                    return clipboard::write(text);
+                                }
+                            }
                             return Task::none();
                         }
                     }
@@ -3311,6 +3382,11 @@ impl Application for App {
                 let entities: Box<[_]> = self.tab_model.iter().collect();
                 for entity in entities {
                     if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
+                        // Search results are driven by user input only, not file system events.
+                        // Rescanning on every write event causes continuous "bouncing" searches.
+                        if matches!(tab.location, Location::Search(..)) {
+                            continue;
+                        }
                         if let Some(path) = tab.location.path_opt() {
                             let mut contains_change = false;
                             for event in &events {
@@ -3972,9 +4048,14 @@ impl Application for App {
                 };
             }
             Message::SearchClear => {
+                self.search_focused = false;
                 return self.search_set_active(None);
             }
+            Message::SearchFocus(focused) => {
+                self.search_focused = focused;
+            }
             Message::SearchInput(input) => {
+                self.search_focused = true;
                 return self.search_set_active(Some(input));
             }
             Message::SetShowDetails(show_details) => {
@@ -4362,9 +4443,11 @@ impl Application for App {
                 if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
                     tab.config.view = view;
                 }
+                // Save view preference without triggering a full update_config cycle
+                // (which would rebuild the nav model and set theme unnecessarily)
                 let mut config = self.config.tab;
                 config.view = view;
-                return self.update(Message::TabConfig(config));
+                config_set!(tab, config);
             }
             Message::CutPaths(paths) => {
                 if let Some(tab) = self.tab_model.active_data_mut::<Tab>() {
@@ -4548,10 +4631,10 @@ impl Application for App {
                 });
             }
             Message::DndExitTab => {
-                self.nav_dnd_hover = None;
+                self.tab_dnd_hover = None;
             }
             Message::DndDropTab(entity, data, action) => {
-                self.nav_dnd_hover = None;
+                self.tab_dnd_hover = None;
                 if let Some((tab, data)) = self.tab_model.data::<Tab>(entity).zip(data) {
                     let kind = match action {
                         DndAction::Move => ClipboardKind::Cut { is_dnd: true },
@@ -5885,7 +5968,10 @@ impl Application for App {
                         .width(Length::Fixed(240.0))
                         .id(self.search_id.clone())
                         .on_clear(Message::SearchClear)
+                        .on_focus(Message::SearchFocus(true))
+                        .on_unfocus(Message::SearchFocus(false))
                         .on_input(Message::SearchInput)
+                        .on_paste(Message::SearchInput)
                         .into(),
                 );
             }
@@ -5917,7 +6003,10 @@ impl Application for App {
                             .width(Length::Fill)
                             .id(self.search_id.clone())
                             .on_clear(Message::SearchClear)
-                            .on_input(Message::SearchInput),
+                            .on_focus(Message::SearchFocus(true))
+                            .on_unfocus(Message::SearchFocus(false))
+                            .on_input(Message::SearchInput)
+                            .on_paste(Message::SearchInput),
                     )
                     .padding(space_xxs),
                 );

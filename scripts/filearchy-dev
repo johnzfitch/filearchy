@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec "$HOME/dev/filearchy/target/release/cosmic-files" "$@"

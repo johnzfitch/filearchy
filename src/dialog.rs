@@ -1448,6 +1448,11 @@ impl Application for App {
                                         Some(location.with_path(PathBuf::from(path_string)).into());
                                 }
                             }
+                            TypeToSearch::SelectByPrefix => {
+                                return self.update(Message::TabMessage(
+                                    tab::Message::SelectByPrefix(text.to_string()),
+                                ));
+                            }
                         }
                     }
                 }

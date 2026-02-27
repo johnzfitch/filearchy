@@ -1,4 +1,4 @@
-name := 'cosmic-files'
+name := 'filearchy'
 export APPID := 'com.system76.CosmicFiles'
 
 rootdir := ''
@@ -64,26 +64,26 @@ dev *args:
     cargo fmt
     just run {{args}}
 
-# Run with debug logs
+# Run with debug logs (--no-daemon keeps process in foreground so logs reach the terminal)
 run *args:
     cargo build --release
-    env RUST_LOG=cosmic_files=debug RUST_BACKTRACE=full {{bin-src}} {{args}}
+    env RUST_LOG=cosmic_files=debug RUST_BACKTRACE=full {{bin-src}} --no-daemon {{args}}
 
 # Run tests
 test *args:
     cargo test {{args}}
 
 flamegraph *args:
-    cargo flamegraph --release --bin cosmic-files -- --no-daemon {{args}}
+    cargo flamegraph --release --bin filearchy -- --no-daemon {{args}}
     xdg-open flamegraph.svg
 
 heaptrack *args:
     #!/usr/bin/env bash
     set -ex
-    rm -fv heaptrack.cosmic-files.*
-    cargo heaptrack --profile release-with-debug --bin cosmic-files -- --no-daemon {{args}}
-    zstd -dc < heaptrack.cosmic-files.*.raw.zst | /usr/lib/heaptrack/libexec/heaptrack_interpret | zstd -c > heaptrack.cosmic-files.zst
-    heaptrack_gui heaptrack.cosmic-files.zst
+    rm -fv heaptrack.filearchy.*
+    cargo heaptrack --profile release-with-debug --bin filearchy -- --no-daemon {{args}}
+    zstd -dc < heaptrack.filearchy.*.raw.zst | /usr/lib/heaptrack/libexec/heaptrack_interpret | zstd -c > heaptrack.filearchy.zst
+    heaptrack_gui heaptrack.filearchy.zst
 
 # Installs files
 install:

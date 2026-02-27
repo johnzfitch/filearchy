@@ -70,7 +70,7 @@ use wayland_client::{Proxy, protocol::wl_output::WlOutput};
 
 use crate::{
     FxOrderMap,
-    clipboard::{ClipboardCopy, ClipboardKind, ClipboardPaste},
+    clipboard::{ClipboardCopy, ClipboardKind, ClipboardPaste, ClipboardPasteImage, ClipboardPasteVideo, ClipboardPasteText},
     config::{
         AppTheme, Config, DesktopConfig, Favorite, IconSizes, TIME_CONFIG_ID, TabConfig,
         TimeConfig, TypeToSearch,
@@ -85,7 +85,7 @@ use crate::{
     mounter::{MOUNTERS, MounterAuth, MounterItem, MounterItems, MounterKey, MounterMessage},
     operation::{
         Controller, Operation, OperationError, OperationErrorType, OperationSelection,
-        ReplaceResult,
+        ReplaceResult, copy_unique_path,
     },
     spawn_detached::spawn_detached,
     tab::{
@@ -97,6 +97,10 @@ use crate::{
     dialog::DialogSettings,
     zoom::{zoom_in_view, zoom_out_view, zoom_to_default},
 };
+
+/// Minimum search term length before a recursive search is triggered.
+/// Prevents searching on every single character when the term is too short to be useful.
+const SEARCH_MIN_LEN: usize = 2;
 
 static PERMANENT_DELETE_BUTTON_ID: LazyLock<widget::Id> =
     LazyLock::new(|| widget::Id::new("permanent-delete-button"));
@@ -145,6 +149,7 @@ pub enum Action {
     AddToSidebar,
     Compress,
     Copy,
+    CopyPath,
     Cut,
     CosmicSettingsDesktop,
     CosmicSettingsDisplays,
@@ -176,6 +181,7 @@ pub enum Action {
     OpenTerminal,
     OpenWith,
     Paste,
+    PasteInto,
     PermanentlyDelete,
     Preview,
     Reload,
@@ -212,6 +218,7 @@ impl Action {
             Self::AddToSidebar => Message::AddToSidebar(entity_opt),
             Self::Compress => Message::Compress(entity_opt),
             Self::Copy => Message::Copy(entity_opt),
+            Self::CopyPath => Message::CopyPath(entity_opt),
             Self::Cut => Message::Cut(entity_opt),
             Self::CosmicSettingsDesktop => Message::CosmicSettings("desktop"),
             Self::CosmicSettingsDisplays => Message::CosmicSettings("displays"),
@@ -245,6 +252,7 @@ impl Action {
             Self::OpenTerminal => Message::OpenTerminal(entity_opt),
             Self::OpenWith => Message::OpenWithDialog(entity_opt),
             Self::Paste => Message::Paste(entity_opt),
+            Self::PasteInto => Message::PasteInto(entity_opt),
             Self::PermanentlyDelete => Message::PermanentlyDelete(entity_opt),
             Self::Preview => Message::Preview(entity_opt),
             Self::Reload => Message::TabMessage(entity_opt, tab::Message::Reload),
@@ -334,6 +342,7 @@ pub enum Message {
     Compress(Option<Entity>),
     Config(Config),
     Copy(Option<Entity>),
+    CopyPath(Option<Entity>),
     CosmicSettings(&'static str),
     Cut(Option<Entity>),
     Delete(Option<Entity>),
@@ -386,7 +395,14 @@ pub enum Message {
     #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
     Overlap(window::Id, OverlapNotifyEvent),
     Paste(Option<Entity>),
+    PasteInto(Option<Entity>),
     PasteContents(PathBuf, ClipboardPaste),
+    PasteImage(PathBuf),
+    PasteImageContents(PathBuf, ClipboardPasteImage),
+    PasteVideo(PathBuf),
+    PasteVideoContents(PathBuf, ClipboardPasteVideo),
+    PasteText(PathBuf),
+    PasteTextContents(PathBuf, ClipboardPasteText),
     PendingCancel(u64),
     PendingCancelAll,
     PendingComplete(u64, OperationSelection),
@@ -406,6 +422,7 @@ pub enum Message {
     ScrollTab(i16),
     SearchActivate,
     SearchClear,
+    SearchFocus(bool),
     SearchInput(String),
     SetShowDetails(bool),
     SetTypeToSearch(TypeToSearch),
@@ -468,18 +485,45 @@ pub enum ContextPage {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum ArchiveType {
+    #[cfg(feature = "bzip2")]
+    TarBz2,
+    #[cfg(feature = "lz4")]
+    TarLz4,
+    #[cfg(feature = "lzma-rust2")]
+    TarXz,
+    #[cfg(feature = "zstd")]
+    TarZst,
     Tgz,
     #[default]
     Zip,
 }
 
 impl ArchiveType {
-    pub const fn all() -> &'static [Self] {
-        &[Self::Tgz, Self::Zip]
+    pub fn all() -> &'static [Self] {
+        &[
+            #[cfg(feature = "bzip2")]
+            Self::TarBz2,
+            #[cfg(feature = "lz4")]
+            Self::TarLz4,
+            #[cfg(feature = "lzma-rust2")]
+            Self::TarXz,
+            #[cfg(feature = "zstd")]
+            Self::TarZst,
+            Self::Tgz,
+            Self::Zip,
+        ]
     }
 
     pub const fn extension(&self) -> &str {
         match self {
+            #[cfg(feature = "bzip2")]
+            Self::TarBz2 => ".tar.bz2",
+            #[cfg(feature = "lz4")]
+            Self::TarLz4 => ".tar.lz4",
+            #[cfg(feature = "lzma-rust2")]
+            Self::TarXz => ".tar.xz",
+            #[cfg(feature = "zstd")]
+            Self::TarZst => ".tar.zst",
             Self::Tgz => ".tgz",
             Self::Zip => ".zip",
         }
@@ -718,6 +762,7 @@ pub struct App {
     failed_operations: BTreeMap<u64, (Operation, Controller, String)>,
     scrollable_id: widget::Id,
     search_id: widget::Id,
+    search_focused: bool,
     size: Option<Size>,
     #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
     layer_sizes: FxHashMap<window::Id, Size>,
@@ -879,7 +924,32 @@ impl App {
         P: std::fmt::Debug + AsRef<Path> + AsRef<std::ffi::OsStr>,
     {
         for app in self.mime_app_cache.get(mime) {
-            let Some(commands) = app.command(paths) else {
+            // Terminal apps (e.g. neovim, nano) need a terminal emulator wrapper.
+            // spawn_detached redirects stdio to null, so running them directly silently fails.
+            let Some(commands) = (if app.terminal {
+                let Some(terminal) = self.mime_app_cache.terminal() else {
+                    log::warn!(
+                        "no terminal emulator found; cannot launch terminal app {:?}",
+                        app.id
+                    );
+                    continue;
+                };
+                let (Some(term_exec), Some(app_exec)) =
+                    (terminal.exec.as_deref(), app.exec.as_deref())
+                else {
+                    log::warn!(
+                        "missing exec for terminal {:?} or app {:?}",
+                        terminal.id,
+                        app.id
+                    );
+                    continue;
+                };
+                // Wrap as "<terminal> -- <app_exec>" so field codes (%f etc) still expand
+                let wrapped = format!("{term_exec} -- {app_exec}");
+                mime_app::exec_to_command(&wrapped, paths)
+            } else {
+                app.command(paths)
+            }) else {
                 continue;
             };
             let len = commands.len();
@@ -1985,6 +2055,12 @@ impl App {
                     Some(self.config.type_to_search),
                     Message::SetTypeToSearch,
                 ))
+                .add(widget::radio(
+                    widget::text::body(fl!("type-to-search-select")),
+                    TypeToSearch::SelectByPrefix,
+                    Some(self.config.type_to_search),
+                    Message::SetTypeToSearch,
+                ))
                 .into(),
             widget::settings::section()
                 .title(fl!("other"))
@@ -2203,6 +2279,7 @@ impl Application for App {
             failed_operations: BTreeMap::new(),
             scrollable_id: widget::Id::new("File Scrollable"),
             search_id: widget::Id::new("File Search"),
+            search_focused: false,
             size: None,
             #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
             surface_ids: FxHashMap::default(),
@@ -2522,6 +2599,7 @@ impl Application for App {
             }
 
             if tab.edit_location.is_some() {
+                // Cancel edit, bar resets to current location
                 tab.edit_location = None;
                 return Task::none();
             }
@@ -2661,6 +2739,12 @@ impl Application for App {
                 let paths = self.selected_paths(entity_opt);
                 let contents = ClipboardCopy::new(ClipboardKind::Copy, paths);
                 return clipboard::write_data(contents);
+            }
+            Message::CopyPath(entity_opt) => {
+                let paths = self.selected_paths(entity_opt);
+                if let Some(path) = paths.into_iter().next() {
+                    return clipboard::write(path.to_string_lossy().into_owned());
+                }
             }
             Message::Cut(entity_opt) => {
                 self.set_cut(entity_opt);
@@ -2867,9 +2951,20 @@ impl Application for App {
                             let available_apps = self.get_apps_for_mime(&mime);
 
                             if let Some((app, _)) = available_apps.get(selected) {
-                                if let Some(mut command) =
+                                let command_opt = if app.terminal {
+                                    self.mime_app_cache.terminal().and_then(|term| {
+                                        let wrapped = format!(
+                                            "{} -- {}",
+                                            term.exec.as_deref().unwrap_or_default(),
+                                            app.exec.as_deref().unwrap_or_default()
+                                        );
+                                        mime_app::exec_to_command(&wrapped, &[&path])
+                                            .and_then(|v| v.into_iter().next())
+                                    })
+                                } else {
                                     app.command(&[&path]).and_then(|v| v.into_iter().next())
-                                {
+                                };
+                                if let Some(mut command) = command_opt {
                                     match spawn_detached(&mut command) {
                                         Ok(()) => {
                                             let _ = recently_used_xbel::update_recently_used(
@@ -2997,8 +3092,83 @@ impl Application for App {
                 let in_surface_ids = false;
                 if self.core.main_window_id() == Some(window_id) || in_surface_ids {
                     let entity = self.tab_model.active();
+
+                    // Check if a text input is focused — skip file operation shortcuts when so
+                    let editing_location = self
+                        .tab_model
+                        .data::<Tab>(entity)
+                        .is_some_and(|tab| tab.location_focused);
+                    let editing_search = self.search_focused;
+                    let dialog_open = self.dialog_pages.front().is_some();
+                    let editing_text_input = editing_location || editing_search || dialog_open;
+                    let is_insert = matches!(
+                        key,
+                        Key::Named(cosmic::iced::keyboard::key::Named::Insert)
+                    );
+
+                    if is_insert && editing_text_input {
+                        if modifiers.shift() && !modifiers.control() {
+                            // Shift+Insert: widget doesn't handle this — manually paste clipboard
+                            if editing_search {
+                                return clipboard::read().map(|opt| {
+                                    cosmic::action::app(Message::SearchInput(
+                                        opt.unwrap_or_default(),
+                                    ))
+                                });
+                            } else if editing_location {
+                                return clipboard::read().map(move |opt| {
+                                    cosmic::action::app(Message::TabMessage(
+                                        Some(entity),
+                                        tab::Message::EditLocationPaste(opt.unwrap_or_default()),
+                                    ))
+                                });
+                            }
+                            return Task::none();
+                        }
+                        if modifiers.control() && !modifiers.shift() {
+                            // Ctrl+Insert: copy current text input content to clipboard
+                            if editing_location {
+                                if let Some(tab) = self.tab_model.data::<Tab>(entity) {
+                                    let text = tab.edit_location.as_ref()
+                                        .map(|el| match &el.location {
+                                            Location::Network(uri, ..) => uri.clone(),
+                                            loc => loc.path_opt()
+                                                .map(|p| p.to_string_lossy().into_owned())
+                                                .unwrap_or_default(),
+                                        })
+                                        .or_else(|| tab.location.path_opt()
+                                            .map(|p| p.to_string_lossy().into_owned()))
+                                        .unwrap_or_default();
+                                    if !text.is_empty() {
+                                        return clipboard::write(text);
+                                    }
+                                }
+                            } else if editing_search {
+                                let text = self.search_get().unwrap_or_default().to_string();
+                                if !text.is_empty() {
+                                    return clipboard::write(text);
+                                }
+                            }
+                            return Task::none();
+                        }
+                    }
+
+                    // Backspace while editing text should not trigger HistoryPrevious
+                    if editing_text_input
+                        && matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Backspace))
+                    {
+                        return Task::none();
+                    }
+
                     for (key_bind, action) in &self.key_binds {
                         if key_bind.matches(modifiers, &key) {
+                            // Skip Copy/Cut/Paste when editing text inputs
+                            // (let the text input widget handle these)
+                            if editing_text_input
+                                && matches!(action, Action::Copy | Action::Cut | Action::Paste)
+                            {
+                                continue;
+                            }
                             return self.update(action.message(Some(entity)));
                         }
                     }
@@ -3038,6 +3208,12 @@ impl Application for App {
                                                 Some(location.with_path(path_string.into()).into());
                                         }
                                     }
+                                }
+                                TypeToSearch::SelectByPrefix => {
+                                    return self.update(Message::TabMessage(
+                                        Some(entity),
+                                        tab::Message::SelectByPrefix(text.to_string()),
+                                    ));
                                 }
                             }
                         }
@@ -3245,6 +3421,11 @@ impl Application for App {
                 let entities: Box<[_]> = self.tab_model.iter().collect();
                 for entity in entities {
                     if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
+                        // Search results are driven by user input only, not file system events.
+                        // Rescanning on every write event causes continuous "bouncing" searches.
+                        if matches!(tab.location, Location::Search(..)) {
+                            continue;
+                        }
                         if let Some(path) = tab.location.path_opt() {
                             let mut contains_change = false;
                             for event in &events {
@@ -3464,10 +3645,34 @@ impl Application for App {
                                     to.clone(),
                                     contents,
                                 )),
-                                None => cosmic::action::none(),
+                                // No file data in clipboard, try image data
+                                None => cosmic::action::app(Message::PasteImage(to.clone())),
                             }
                         });
                     }
+                }
+            }
+            Message::PasteInto(entity_opt) => {
+                // Paste into the first selected directory
+                let entity = entity_opt.unwrap_or_else(|| self.tab_model.active());
+                let target_dir = self.tab_model.data::<Tab>(entity).and_then(|tab| {
+                    tab.items_opt().and_then(|items| {
+                        items
+                            .iter()
+                            .find(|item| item.selected && item.metadata.is_dir())
+                            .and_then(|item| item.path_opt())
+                            .map(|p| p.to_path_buf())
+                    })
+                });
+                if let Some(to) = target_dir {
+                    return clipboard::read_data::<ClipboardPaste>().map(move |contents_opt| {
+                        match contents_opt {
+                            Some(contents) => {
+                                cosmic::action::app(Message::PasteContents(to.clone(), contents))
+                            }
+                            None => cosmic::action::app(Message::PasteImage(to.clone())),
+                        }
+                    });
                 }
             }
             Message::PasteContents(to, mut contents) => {
@@ -3484,6 +3689,102 @@ impl Application for App {
                             cross_device_copy: is_dnd,
                         }),
                     };
+                }
+            }
+            Message::PasteImage(to) => {
+                return clipboard::read_data::<ClipboardPasteImage>().map(move |contents_opt| {
+                    match contents_opt {
+                        Some(contents) => {
+                            cosmic::action::app(Message::PasteImageContents(to.clone(), contents))
+                        }
+                        // No image data in clipboard, try video data
+                        None => cosmic::action::app(Message::PasteVideo(to.clone())),
+                    }
+                });
+            }
+            Message::PasteImageContents(to, contents) => {
+                let Some(extension) = contents.extension() else {
+                    log::warn!(
+                        "Ignoring paste: unknown image MIME type {:?}",
+                        contents.mime_type
+                    );
+                    return Task::none();
+                };
+
+                // Generate unique filename for the pasted image
+                let base_name = format!("{}.{}", fl!("pasted-image"), extension);
+                let base_path = to.join(&base_name);
+                let final_path = copy_unique_path(&base_path, &to);
+
+                // Write image data to file
+                match fs::write(&final_path, &contents.data) {
+                    Ok(_) => {
+                        log::info!("Pasted image saved to {:?}", final_path);
+                    }
+                    Err(err) => {
+                        log::error!("Failed to save pasted image: {}", err);
+                    }
+                }
+            }
+            Message::PasteVideo(to) => {
+                return clipboard::read_data::<ClipboardPasteVideo>().map(move |contents_opt| {
+                    match contents_opt {
+                        Some(contents) => {
+                            cosmic::action::app(Message::PasteVideoContents(to.clone(), contents))
+                        }
+                        // No video data in clipboard, try text data
+                        None => cosmic::action::app(Message::PasteText(to.clone())),
+                    }
+                });
+            }
+            Message::PasteVideoContents(to, contents) => {
+                let Some(extension) = contents.extension() else {
+                    log::warn!(
+                        "Ignoring paste: unknown video MIME type {:?}",
+                        contents.mime_type
+                    );
+                    return Task::none();
+                };
+
+                // Generate unique filename for the pasted video
+                let base_name = format!("{}.{}", fl!("pasted-video"), extension);
+                let base_path = to.join(&base_name);
+                let final_path = copy_unique_path(&base_path, &to);
+
+                // Write video data to file
+                match fs::write(&final_path, &contents.data) {
+                    Ok(_) => {
+                        log::info!("Pasted video saved to {:?}", final_path);
+                    }
+                    Err(err) => {
+                        log::error!("Failed to save pasted video: {}", err);
+                    }
+                }
+            }
+            Message::PasteText(to) => {
+                return clipboard::read_data::<ClipboardPasteText>().map(move |contents_opt| {
+                    match contents_opt {
+                        Some(contents) => {
+                            cosmic::action::app(Message::PasteTextContents(to.clone(), contents))
+                        }
+                        None => cosmic::action::none(),
+                    }
+                });
+            }
+            Message::PasteTextContents(to, contents) => {
+                // Generate unique filename for the pasted text
+                let base_name = format!("{}.txt", fl!("pasted-text"));
+                let base_path = to.join(&base_name);
+                let final_path = copy_unique_path(&base_path, &to);
+
+                // Write text data to file
+                match fs::write(&final_path, &contents.data) {
+                    Ok(_) => {
+                        log::info!("Pasted text saved to {:?}", final_path);
+                    }
+                    Err(err) => {
+                        log::error!("Failed to save pasted text: {}", err);
+                    }
                 }
             }
             Message::PendingCancel(id) => {
@@ -3669,7 +3970,10 @@ impl Application for App {
                                 id,
                                 Window::new(WindowKind::Preview(entity_opt, preview_kind)),
                             );
-                            return command.map(|_id| cosmic::action::none());
+                            return Task::batch([
+                                self.update_desktop(), // Force re-calculating of directory sizes
+                                command.map(|_id| cosmic::action::none()),
+                            ]);
                         }
                     }
                 }
@@ -3783,9 +4087,27 @@ impl Application for App {
                 };
             }
             Message::SearchClear => {
+                self.search_focused = false;
                 return self.search_set_active(None);
             }
+            Message::SearchFocus(focused) => {
+                self.search_focused = focused;
+            }
             Message::SearchInput(input) => {
+                self.search_focused = true;
+                // Don't re-run a search that's already active with the exact same term.
+                // This prevents double-firing from on_input + on_paste both triggering.
+                if self.search_get() == Some(input.as_str()) {
+                    return Task::none();
+                }
+                // Don't trigger a search until the term is long enough to be useful.
+                // If the term is shortened back below the minimum, cancel any active search.
+                if input.len() < SEARCH_MIN_LEN {
+                    if self.search_get().is_some() {
+                        return self.search_set_active(None);
+                    }
+                    return Task::none();
+                }
                 return self.search_set_active(Some(input));
             }
             Message::SetShowDetails(show_details) => {
@@ -4173,9 +4495,11 @@ impl Application for App {
                 if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
                     tab.config.view = view;
                 }
+                // Save view preference without triggering a full update_config cycle
+                // (which would rebuild the nav model and set theme unnecessarily)
                 let mut config = self.config.tab;
                 config.view = view;
-                return self.update(Message::TabConfig(config));
+                config_set!(tab, config);
             }
             Message::CutPaths(paths) => {
                 if let Some(tab) = self.tab_model.active_data_mut::<Tab>() {
@@ -4359,10 +4683,10 @@ impl Application for App {
                 });
             }
             Message::DndExitTab => {
-                self.nav_dnd_hover = None;
+                self.tab_dnd_hover = None;
             }
             Message::DndDropTab(entity, data, action) => {
-                self.nav_dnd_hover = None;
+                self.tab_dnd_hover = None;
                 if let Some((tab, data)) = self.tab_model.data::<Tab>(entity).zip(data) {
                     let kind = match action {
                         DndAction::Move => ClipboardKind::Cut { is_dnd: true },
@@ -4989,6 +5313,7 @@ impl Application for App {
                         .on_input(move |password| {
                             Message::DialogUpdate(DialogPage::ExtractPassword { id: *id, password })
                         })
+                        .on_submit(|_| Message::DialogComplete)
                         .id(self.dialog_text_input.clone()),
                 )
                 .primary_action(
@@ -5695,7 +6020,10 @@ impl Application for App {
                         .width(Length::Fixed(240.0))
                         .id(self.search_id.clone())
                         .on_clear(Message::SearchClear)
+                        .on_focus(Message::SearchFocus(true))
+                        .on_unfocus(Message::SearchFocus(false))
                         .on_input(Message::SearchInput)
+                        .on_paste(Message::SearchInput)
                         .into(),
                 );
             }
@@ -5727,7 +6055,10 @@ impl Application for App {
                             .width(Length::Fill)
                             .id(self.search_id.clone())
                             .on_clear(Message::SearchClear)
-                            .on_input(Message::SearchInput),
+                            .on_focus(Message::SearchFocus(true))
+                            .on_unfocus(Message::SearchFocus(false))
+                            .on_input(Message::SearchInput)
+                            .on_paste(Message::SearchInput),
                     )
                     .padding(space_xxs),
                 );
@@ -5883,8 +6214,17 @@ impl Application for App {
                     text,
                     ..
                 }) => match status {
+                    // Only forward uncaptured key events (captured means a widget handled it)
                     event::Status::Ignored => Some(Message::Key(window_id, modifiers, key, text)),
-                    event::Status::Captured => None,
+                    // Exception: Always forward Insert key for omarchy clipboard bindings
+                    // (Super+C/V send Ctrl/Shift+Insert via sendshortcut)
+                    event::Status::Captured => {
+                        if matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert)) {
+                            Some(Message::Key(window_id, modifiers, key, text))
+                        } else {
+                            None
+                        }
+                    }
                 },
                 Event::Keyboard(KeyEvent::ModifiersChanged(modifiers)) => {
                     Some(Message::ModifiersChanged(window_id, modifiers))
@@ -6232,18 +6572,39 @@ impl Application for App {
             }
         }
 
-        let mut selected_preview = None;
-        if self.core.window.show_context {
-            if let ContextPage::Preview(entity_opt, PreviewKind::Selected) = self.context_page {
-                selected_preview = Some(entity_opt.unwrap_or_else(|| self.tab_model.active()));
+        let mut selected_previews = Vec::new();
+        match self.mode {
+            Mode::App => {
+                if self.core.window.show_context {
+                    if let ContextPage::Preview(entity_opt, PreviewKind::Selected) =
+                        self.context_page
+                    {
+                        selected_previews
+                            .push(Some(entity_opt.unwrap_or_else(|| self.tab_model.active())));
+                    }
+                }
+            }
+            Mode::Desktop => {
+                for window_kind in self.windows.iter().map(|(_, window)| &window.kind) {
+                    if let WindowKind::Preview(entity_opt, _) = window_kind {
+                        selected_previews
+                            .push(Some(entity_opt.unwrap_or_else(|| self.tab_model.active())));
+                    }
+                }
             }
         }
+
         subscriptions.extend(self.tab_model.iter().filter_map(|entity| {
             let tab = self.tab_model.data::<Tab>(entity)?;
             Some(
-                tab.subscription(selected_preview == Some(entity))
-                    .with(entity)
-                    .map(|(entity, tab_msg)| Message::TabMessage(Some(entity), tab_msg)),
+                tab.subscription(
+                    selected_previews
+                        .iter()
+                        .find(|preview| preview.as_ref() == Some(entity).as_ref())
+                        .is_some(),
+                )
+                .with(entity)
+                .map(|(entity, tab_msg)| Message::TabMessage(Some(entity), tab_msg)),
             )
         }));
 

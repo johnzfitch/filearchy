@@ -6,6 +6,10 @@ edition = "2024"
 license = "GPL-3.0-only"
 rust-version = "1.85"
 
+[[bin]]
+name = "filearchy"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["unstable-locales"] }
@@ -46,6 +50,8 @@ bzip2 = { version = "0.6", optional = true }            #TODO: replace with pure
 flate2 = "1.1"
 tar = "0.4.44"
 lzma-rust2 = { version = "0.15", optional = true }
+lz4_flex = { version = "0.11", optional = true }
+zstd = { version = "0.13", optional = true }
 ordermap = { version = "1.0.0", features = ["serde"] }
 # Internationalization
 i18n-embed = { version = "0.16", features = [
@@ -65,9 +71,12 @@ num_cpus = "1.17.0"
 
 # Completion-based IO runtime to enable io_uring / IOCP file IO support.
 [dependencies.compio]
-version = "0.16.0"
+# Patched to fix mtime: https://github.com/compio-rs/compio/pull/625
+# version = "0.17.0"
+git = "https://github.com/jackpot51/compio.git"
+rev = "8235a1fcccde233362bb76df45b509c12ca79972"
 default-features = false
-features = ["io", "macros", "polling", "runtime"]
+features = ["fs", "io", "macros", "polling", "runtime"]
 
 [dependencies.io-uring]
 version = "0.7.11"
@@ -75,7 +84,8 @@ default-features = false
 optional = true
 
 [dependencies.libcosmic]
-git = "https://github.com/pop-os/libcosmic.git"
+git = "https://github.com/johnzfitch/libcosmic.git"
+rev = "bcc1e90ae787c87c16d221a700453cb689e352d6"
 default-features = false
 #TODO: a11y feature crashes
 features = ["about", "autosize", "multi-window", "tokio", "winit", "surface-message"]
@@ -99,10 +109,12 @@ default = [
     "desktop",
     "gvfs",
     "io-uring",
+    "lz4",
     "lzma-rust2",
     "notify",
     "wgpu",
     "wayland",
+    "zstd",
 ]
 dbus-config = ["libcosmic/dbus-config"]
 desktop = ["libcosmic/desktop", "dep:cosmic-mime-apps", "dep:xdg"]
@@ -111,9 +123,11 @@ gvfs = ["dep:gio", "dep:glib"]
 io-uring = ["compio/io-uring", "dep:io-uring"]
 io-uring-bindgen = ["io-uring?/bindgen"]
 jemalloc = ["dep:tikv-jemallocator"]
+lz4 = ["dep:lz4_flex"]
 notify = ["dep:notify-rust"]
 wayland = ["libcosmic/wayland", "dep:cctk", "dep:wayland-client"]
 wgpu = ["libcosmic/wgpu"]
+zstd = ["dep:zstd"]
 
 [profile.dev]
 opt-level = 1

@@ -297,6 +297,7 @@ light = Light
 type-to-search = Type to search
 type-to-search-recursive = Searches the current folder and all subfolders
 type-to-search-enter-path = Enters the path to the directory or file
+type-to-search-select = Selects the first matching file or folder
 
 # Context menu
 add-to-sidebar = Add to sidebar
@@ -336,7 +337,12 @@ quit = Quit
 edit = Edit
 cut = Cut
 copy = Copy
+copy-path = Copy Full Path
 paste = Paste
+paste-into-folder = Paste Into Folder
+pasted-image = pasted-image
+pasted-video = pasted-video
+pasted-text = pasted-text
 select-all = Select all
 
 ## View

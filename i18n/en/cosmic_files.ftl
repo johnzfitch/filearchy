@@ -301,7 +301,7 @@ type-to-search-select = Selects the first matching file or folder
 
 # Context menu
 add-to-sidebar = Add to sidebar
-compress = Compress
+compress = Compress...
 delete-permanently = Delete permanently
 eject = Eject
 extract-here = Extract

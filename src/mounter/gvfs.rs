@@ -525,28 +525,15 @@ impl Gvfs {
                             };
 
                             if needs_mount {
-                                let mount_op = mount_op(resolved_uri.clone(), event_tx.clone());
-                                let event_tx = event_tx.clone();
-                                file.mount_enclosing_volume(
-                                    gio::MountMountFlags::empty(),
-                                    Some(&mount_op),
-                                    gio::Cancellable::NONE,
-                                    move |res| {
-                                        log::info!("network scan mounted {resolved_uri}: result {res:?}");
-                                        // FIXME sometimes a uri can be mounted and then not recognized as mounted...
-                                        // seems to be related to uri with a path
-                                        items_tx.blocking_send(network_scan(&uri, sizes)).unwrap();
-                                        event_tx.send(Event::NetworkResult(resolved_uri, match res {
-                                            Ok(()) => {
-                                                Ok(true)
-                                            },
-                                            Err(err) => match err.kind::<gio::IOErrorEnum>() {
-                                                Some(gio::IOErrorEnum::FailedHandled) => Ok(false),
-                                                _ => Err(format!("{err}"))
-                                            }
-                                        })).unwrap();
-                                    }
+                                log::info!(
+                                    "skipping background mount for network scan of {resolved_uri}"
                                 );
+                                items_tx
+                                    .send(Err(format!(
+                                        "network location is not mounted: {resolved_uri}"
+                                    )))
+                                    .await
+                                    .unwrap();
                             } else {
                                 items_tx.send(network_scan(&uri, sizes)).await.unwrap();
                             }

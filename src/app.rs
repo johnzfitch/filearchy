@@ -70,7 +70,10 @@ use wayland_client::{Proxy, protocol::wl_output::WlOutput};
 
 use crate::{
     FxOrderMap,
-    clipboard::{ClipboardCopy, ClipboardKind, ClipboardPaste, ClipboardPasteImage, ClipboardPasteVideo, ClipboardPasteText},
+    clipboard::{
+        ClipboardCopy, ClipboardKind, ClipboardPaste, ClipboardPasteImage, ClipboardPasteText,
+        ClipboardPasteVideo,
+    },
     config::{
         AppTheme, Config, DesktopConfig, Favorite, IconSizes, TIME_CONFIG_ID, TabConfig,
         TimeConfig, TypeToSearch,
@@ -101,6 +104,37 @@ use crate::{
 /// Minimum search term length before a recursive search is triggered.
 /// Prevents searching on every single character when the term is too short to be useful.
 const SEARCH_MIN_LEN: usize = 2;
+
+fn key_is_character(key: &Key, expected: &str) -> bool {
+    matches!(key, Key::Character(chars) if chars.eq_ignore_ascii_case(expected))
+}
+
+fn should_forward_captured_key(key: &Key, modifiers: Modifiers, text: Option<&SmolStr>) -> bool {
+    if matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert)) {
+        return true;
+    }
+
+    if !modifiers.alt()
+        && ((modifiers.logo()
+            && !modifiers.control()
+            && (key_is_character(key, "c")
+                || key_is_character(key, "x")
+                || key_is_character(key, "v")))
+            || (modifiers.control()
+                && !modifiers.logo()
+                && (key_is_character(key, "c")
+                    || key_is_character(key, "x")
+                    || key_is_character(key, "v"))))
+    {
+        return true;
+    }
+
+    matches!(key, Key::Character(_))
+        && !modifiers.logo()
+        && !modifiers.control()
+        && !modifiers.alt()
+        && text.is_some()
+}
 
 static PERMANENT_DELETE_BUTTON_ID: LazyLock<widget::Id> =
     LazyLock::new(|| widget::Id::new("permanent-delete-button"));
@@ -3101,10 +3135,8 @@ impl Application for App {
                     let editing_search = self.search_focused;
                     let dialog_open = self.dialog_pages.front().is_some();
                     let editing_text_input = editing_location || editing_search || dialog_open;
-                    let is_insert = matches!(
-                        key,
-                        Key::Named(cosmic::iced::keyboard::key::Named::Insert)
-                    );
+                    let is_insert =
+                        matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert));
 
                     if is_insert && editing_text_input {
                         if modifiers.shift() && !modifiers.control() {
@@ -3129,15 +3161,21 @@ impl Application for App {
                             // Ctrl+Insert: copy current text input content to clipboard
                             if editing_location {
                                 if let Some(tab) = self.tab_model.data::<Tab>(entity) {
-                                    let text = tab.edit_location.as_ref()
+                                    let text = tab
+                                        .edit_location
+                                        .as_ref()
                                         .map(|el| match &el.location {
                                             Location::Network(uri, ..) => uri.clone(),
-                                            loc => loc.path_opt()
+                                            loc => loc
+                                                .path_opt()
                                                 .map(|p| p.to_string_lossy().into_owned())
                                                 .unwrap_or_default(),
                                         })
-                                        .or_else(|| tab.location.path_opt()
-                                            .map(|p| p.to_string_lossy().into_owned()))
+                                        .or_else(|| {
+                                            tab.location
+                                                .path_opt()
+                                                .map(|p| p.to_string_lossy().into_owned())
+                                        })
                                         .unwrap_or_default();
                                     if !text.is_empty() {
                                         return clipboard::write(text);
@@ -3155,7 +3193,10 @@ impl Application for App {
 
                     // Backspace while editing text should not trigger HistoryPrevious
                     if editing_text_input
-                        && matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Backspace))
+                        && matches!(
+                            key,
+                            Key::Named(cosmic::iced::keyboard::key::Named::Backspace)
+                        )
                     {
                         return Task::none();
                     }
@@ -3173,19 +3214,25 @@ impl Application for App {
                         }
                     }
 
-                    // Uncaptured keys with only shift modifiers go to the search or location box
+                    // Printable keys should still work for type-to-search even if a focused
+                    // widget captured the event first.
                     if matches!(self.mode, Mode::App)
+                        && !editing_text_input
                         && !modifiers.logo()
                         && !modifiers.control()
                         && !modifiers.alt()
                         && matches!(key, Key::Character(_))
                     {
-                        if let Some(text) = text {
+                        let input = text.as_ref().map(|s| s.as_str()).or_else(|| match &key {
+                            Key::Character(chars) => Some(chars.as_str()),
+                            _ => None,
+                        });
+                        if let Some(text) = input {
                             match self.config.type_to_search {
                                 TypeToSearch::Recursive => {
                                     let mut term =
                                         self.search_get().unwrap_or_default().to_string();
-                                    term.push_str(&text);
+                                    term.push_str(text);
                                     return self.search_set_active(Some(term));
                                 }
                                 TypeToSearch::EnterPath => {
@@ -3197,13 +3244,13 @@ impl Application for App {
                                         // Try to add text to end of location
                                         if let Location::Network(uri, ..) = location {
                                             let mut uri_string = uri.clone();
-                                            uri_string.push_str(&text);
+                                            uri_string.push_str(text);
                                             tab.edit_location =
                                                 Some(location.with_uri(uri_string).into());
                                         } else if let Some(path) = location.path_opt() {
                                             let mut path_string =
                                                 path.to_string_lossy().into_owned();
-                                            path_string.push_str(&text);
+                                            path_string.push_str(text);
                                             tab.edit_location =
                                                 Some(location.with_path(path_string.into()).into());
                                         }
@@ -6247,10 +6294,8 @@ impl Application for App {
                 }) => match status {
                     // Only forward uncaptured key events (captured means a widget handled it)
                     event::Status::Ignored => Some(Message::Key(window_id, modifiers, key, text)),
-                    // Exception: Always forward Insert key for omarchy clipboard bindings
-                    // (Super+C/V send Ctrl/Shift+Insert via sendshortcut)
                     event::Status::Captured => {
-                        if matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert)) {
+                        if should_forward_captured_key(&key, modifiers, text.as_ref()) {
                             Some(Message::Key(window_id, modifiers, key, text))
                         } else {
                             None

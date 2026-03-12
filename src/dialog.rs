@@ -1834,7 +1834,8 @@ impl Application for App {
                                             }
                                         }
                                     }
-                                    DialogFilterPattern::Mime(value) => match value.parse::<Mime>() {
+                                    DialogFilterPattern::Mime(value) => match value.parse::<Mime>()
+                                    {
                                         Ok(parsed) => mimes.push(parsed),
                                         Err(err) => {
                                             log::warn!("failed to parse mime {value:?}: {err}");
@@ -1847,7 +1848,9 @@ impl Application for App {
                                 // Directories are always shown
                                 item.metadata.is_dir()
                                     || mimes.iter().any(|filter_mime| {
-                                        if filter_mime.subtype() == mime::STAR {
+                                        if filter_mime.type_() == mime::STAR {
+                                            true
+                                        } else if filter_mime.subtype() == mime::STAR {
                                             filter_mime.type_() == item.mime.type_()
                                         } else {
                                             *filter_mime == item.mime

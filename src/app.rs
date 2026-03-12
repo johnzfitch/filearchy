@@ -109,7 +109,7 @@ fn key_is_character(key: &Key, expected: &str) -> bool {
     matches!(key, Key::Character(chars) if chars.eq_ignore_ascii_case(expected))
 }
 
-fn should_forward_captured_key(key: &Key, modifiers: Modifiers, text: Option<&SmolStr>) -> bool {
+fn should_forward_captured_key(key: &Key, modifiers: Modifiers) -> bool {
     if matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert)) {
         return true;
     }
@@ -133,7 +133,6 @@ fn should_forward_captured_key(key: &Key, modifiers: Modifiers, text: Option<&Sm
         && !modifiers.logo()
         && !modifiers.control()
         && !modifiers.alt()
-        && text.is_some()
 }
 
 static PERMANENT_DELETE_BUTTON_ID: LazyLock<widget::Id> =
@@ -2350,6 +2349,7 @@ impl Application for App {
             commands.push(app.open_tab(location, true, None));
         }
         for location in flags.uris {
+            let uri = location.as_str().to_string();
             if let Some(e) = app.nav_model.iter().find(|e| {
                 app.nav_model.data::<Location>(*e).is_some_and(
                     |l| matches!(l, Location::Network(uri, ..) if *uri == *location.as_str()),
@@ -2358,6 +2358,8 @@ impl Application for App {
                 commands.push(cosmic::task::message(cosmic::Action::App(
                     Message::NetworkDriveOpenEntityAfterMount { entity: e },
                 )));
+            } else {
+                commands.push(app.open_tab(Location::Network(uri.clone(), uri, None), true, None));
             }
         }
 
@@ -2482,6 +2484,29 @@ impl Application for App {
         self.nav_model.activate(entity);
         if let Some(location) = self.nav_model.data::<Location>(entity) {
             let should_open = match location {
+                #[cfg(feature = "gvfs")]
+                Location::Network(uri, _, None) => {
+                    if let Some(key) = self
+                        .mounter_items
+                        .iter()
+                        .find_map(|(k, items)| {
+                            items
+                                .iter()
+                                .any(|item| item.uri() == *uri && !item.is_mounted())
+                                .then_some(*k)
+                        })
+                        .or_else(|| self.mounter_items.keys().copied().next())
+                    {
+                        if let Some(mounter) = MOUNTERS.get(&key) {
+                            return mounter.network_drive(uri.clone()).map(move |()| {
+                                cosmic::Action::App(Message::NetworkDriveOpenEntityAfterMount {
+                                    entity,
+                                })
+                            });
+                        }
+                    }
+                    true
+                }
                 #[cfg(feature = "gvfs")]
                 Location::Network(uri, name, Some(path))
                     if !path.try_exists().unwrap_or_default() =>
@@ -6295,7 +6320,7 @@ impl Application for App {
                     // Only forward uncaptured key events (captured means a widget handled it)
                     event::Status::Ignored => Some(Message::Key(window_id, modifiers, key, text)),
                     event::Status::Captured => {
-                        if should_forward_captured_key(&key, modifiers, text.as_ref()) {
+                        if should_forward_captured_key(&key, modifiers) {
                             Some(Message::Key(window_id, modifiers, key, text))
                         } else {
                             None

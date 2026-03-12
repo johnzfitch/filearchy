@@ -1138,24 +1138,21 @@ pub fn scan_trash(sizes: IconSizes) -> Vec<Item> {
             // the file in Trash/files/ doesn't exist (race between list() and metadata(),
             // or orphaned .trashinfo files). Catch the panic so one bad entry doesn't
             // crash the whole scan.
-            let metadata =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    trash::os_limited::metadata(&entry)
-                }))
-                .unwrap_or_else(|_| {
-                    log::warn!(
-                        "trash::os_limited::metadata panicked for {:?} \
+            let metadata = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                trash::os_limited::metadata(&entry)
+            }))
+            .unwrap_or_else(|_| {
+                log::warn!(
+                    "trash::os_limited::metadata panicked for {:?} \
                          (orphaned or in-flight trash entry, skipping)",
-                        entry
-                    );
-                    Err(trash::Error::Unknown {
-                        description: "orphaned trash entry".into(),
-                    })
+                    entry
+                );
+                Err(trash::Error::Unknown {
+                    description: "orphaned trash entry".into(),
                 })
-                .inspect_err(|err| {
-                    log::warn!("failed to get metadata for trash item {entry:?}: {err}")
-                })
-                .ok()?;
+            })
+            .inspect_err(|err| log::warn!("failed to get metadata for trash item {entry:?}: {err}"))
+            .ok()?;
             let original_path = entry.original_path();
             let name = entry.name.to_string_lossy().into_owned();
             let display_name = Item::display_name(&name);
@@ -1899,7 +1896,8 @@ impl ItemThumbnail {
         // because the image crate does not support SVG and would just log an error.
         let is_svg = mime.subtype().as_str() == "svg+xml";
         // First try built-in image thumbnailer
-        if mime.type_() == mime::IMAGE && !is_svg && check_size("image", max_size_mb * 1000 * 1000) {
+        if mime.type_() == mime::IMAGE && !is_svg && check_size("image", max_size_mb * 1000 * 1000)
+        {
             // Check if image dimensions would exceed available memory budget
             // The GPU tiling system can handle large images, but we still need to decode them first
             let dimensions_ok = match image::image_dimensions(path) {
@@ -4696,11 +4694,10 @@ impl Tab {
             View::Grid => ("view-list-symbolic", Action::TabViewList),
             View::List => ("view-grid-symbolic", Action::TabViewGrid),
         };
-        let view_button =
-            widget::button::custom(widget::icon::from_name(view_icon).size(16))
-                .on_press(Message::ContextAction(next_view_action))
-                .padding(space_xxs)
-                .class(theme::Button::Icon);
+        let view_button = widget::button::custom(widget::icon::from_name(view_icon).size(16))
+            .on_press(Message::ContextAction(next_view_action))
+            .padding(space_xxs)
+            .class(theme::Button::Icon);
         row = row.push(view_button);
 
         let mut prev_button =
@@ -4804,7 +4801,8 @@ impl Tab {
                 };
                 (s, el.location.clone())
             } else {
-                let s = self.location
+                let s = self
+                    .location
                     .path_opt()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|| self.location.to_string());
@@ -4844,7 +4842,11 @@ impl Tab {
 
             let mut popover =
                 widget::popover(text_input).position(widget::popover::Position::Bottom);
-            if let Some(completions) = self.edit_location.as_ref().and_then(|el| el.completions.as_ref()) {
+            if let Some(completions) = self
+                .edit_location
+                .as_ref()
+                .and_then(|el| el.completions.as_ref())
+            {
                 if !completions.is_empty() {
                     let mut column =
                         widget::column::with_capacity(completions.len()).padding(space_xxs);
@@ -4882,7 +4884,7 @@ impl Tab {
         }
 
         // Breadcrumb fallback — never reached (always-open bar returns above).
-        #[allow(unused_variables, unused_assignments)]
+        #[allow(unreachable_code, unused_variables, unused_assignments)]
         let mut w = 0.0f32;
         let mut children: Vec<Element<_>> = Vec::new();
         match &self.location {

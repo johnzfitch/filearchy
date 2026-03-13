@@ -69,6 +69,9 @@ use std::{
     sync::{Arc, LazyLock, RwLock, atomic},
     time::{Duration, Instant, SystemTime},
 };
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 use trash::TrashItemSize;
@@ -101,6 +104,7 @@ pub const HOVER_DURATION: Duration = Duration::from_millis(1600);
 //TODO: best limit for search items
 const MAX_SEARCH_LATENCY: Duration = Duration::from_millis(20);
 const MAX_SEARCH_RESULTS: usize = 200;
+const SEARCH_READY_BATCH_SIZE: usize = 24;
 //TODO: configurable thumbnail size?
 const THUMBNAIL_SIZE: u32 = (ICON_SIZE_GRID as u32) * (ICON_SCALE_MAX as u32);
 
@@ -895,6 +899,62 @@ pub fn item_from_entry(
     }
 }
 
+fn item_from_search_entry(
+    path: PathBuf,
+    name: String,
+    metadata: fs::Metadata,
+    sizes: IconSizes,
+) -> Item {
+    let hidden = name.starts_with('.') || hidden_attribute(&metadata);
+
+    let (mime, icon_handle_grid, icon_handle_list, icon_handle_list_condensed, thumbnail_opt) =
+        if metadata.is_dir() {
+            (
+                "inode/directory".parse().unwrap(),
+                folder_icon(&path, sizes.grid()),
+                folder_icon(&path, sizes.list()),
+                folder_icon(&path, sizes.list_condensed()),
+                Some(ItemThumbnail::NotImage),
+            )
+        } else {
+            // Search streams many results quickly; use extension-based MIME guessing here and
+            // avoid the heavier shared-mime content sniffing path on every match.
+            let mime = mime_guess::from_path(&path).first_or_octet_stream();
+            (
+                mime.clone(),
+                mime_icon(mime.clone(), sizes.grid()),
+                mime_icon(mime.clone(), sizes.list()),
+                mime_icon(mime, sizes.list_condensed()),
+                None,
+            )
+        };
+
+    Item {
+        name: name.clone(),
+        display_name: Item::display_name(&name),
+        is_mount_point: false,
+        metadata: ItemMetadata::Path {
+            metadata,
+            children_opt: None,
+        },
+        hidden,
+        location_opt: Some(Location::Path(path)),
+        mime,
+        icon_handle_grid,
+        icon_handle_list,
+        icon_handle_list_condensed,
+        thumbnail_opt,
+        button_id: widget::Id::unique(),
+        pos_opt: Cell::new(None),
+        rect_opt: Cell::new(None),
+        selected: false,
+        highlighted: false,
+        overlaps_drag_rect: false,
+        dir_size: DirSize::NotDirectory,
+        cut: false,
+    }
+}
+
 fn get_filename_from_path(path: &Path) -> Result<String, String> {
     Ok(match path.file_name() {
         Some(name_os) => name_os
@@ -1032,70 +1092,198 @@ pub fn scan_path(tab_path: &PathBuf, sizes: IconSizes) -> Vec<Item> {
     items
 }
 
+fn contains_case_insensitive_ascii(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+
+    if needle.is_empty() {
+        return true;
+    }
+
+    haystack.len() >= needle.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn contains_case_insensitive_ascii_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    haystack.len() >= needle.len()
+        && haystack.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle.iter())
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        })
+}
+
+fn file_name_matches_search_os(
+    file_name_os: &std::ffi::OsStr,
+    term: &str,
+    term_ascii: Option<&[u8]>,
+    term_lower: Option<&str>,
+) -> Option<bool> {
+    #[cfg(unix)]
+    {
+        if let Some(term_ascii) = term_ascii {
+            return Some(contains_case_insensitive_ascii_bytes(
+                file_name_os.as_bytes(),
+                term_ascii,
+            ));
+        }
+    }
+
+    let file_name = file_name_os.to_str()?;
+    Some(match term_lower {
+        Some(term_lower) => file_name.to_lowercase().contains(term_lower),
+        None => contains_case_insensitive_ascii(file_name, term),
+    })
+}
+
+fn search_result_insert_cmp(
+    inserted_modified: Option<SystemTime>,
+    existing_modified: Option<SystemTime>,
+) -> Ordering {
+    // Search results are kept in descending modified order.
+    inserted_modified.cmp(&existing_modified)
+}
+
 pub fn scan_search<F: Fn(&Path, &str, Metadata) -> bool + Sync>(
     tab_path: &PathBuf,
     term: &str,
     show_hidden: bool,
     callback: F,
+    should_continue: &impl Fn() -> bool,
 ) {
     if term.is_empty() {
         return;
     }
 
-    let pattern = regex::escape(term);
-    let regex = match regex::RegexBuilder::new(&pattern)
-        .case_insensitive(true)
-        .build()
-    {
-        Ok(ok) => ok,
-        Err(err) => {
-            log::warn!("failed to parse regex {pattern:?}: {err}");
+    let term_ascii = term.is_ascii().then_some(term.as_bytes());
+    let term_lower = term_ascii.is_none().then(|| term.to_lowercase());
+    let root_dev = fs::metadata(tab_path).ok().map(|metadata| metadata.dev());
+    let mut pending_dirs = vec![tab_path.clone()];
+
+    while let Some(dir_path) = pending_dirs.pop() {
+        if !should_continue() {
             return;
         }
-    };
 
-    ignore::WalkBuilder::new(tab_path)
-        .standard_filters(false)
-        .hidden(!show_hidden)
-        //TODO: only use this on supported targets
-        .same_file_system(true)
-        .build_parallel()
-        .run(|| {
-            Box::new(|entry_res| {
-                let Ok(entry) = entry_res else {
-                    // Skip invalid entries
-                    return ignore::WalkState::Skip;
-                };
+        let entries = match fs::read_dir(&dir_path) {
+            Ok(entries) => entries,
+            Err(err) => {
+                log::warn!(
+                    "failed to read search directory {}: {}",
+                    dir_path.display(),
+                    err
+                );
+                continue;
+            }
+        };
 
-                let Some(file_name) = entry.file_name().to_str() else {
-                    // Skip anything with an invalid name
-                    return ignore::WalkState::Skip;
-                };
+        for entry_res in entries {
+            if !should_continue() {
+                return;
+            }
 
-                if regex.is_match(file_name) {
-                    let path = entry.path();
+            let entry = match entry_res {
+                Ok(entry) => entry,
+                Err(err) => {
+                    log::warn!(
+                        "failed to read entry in search directory {}: {}",
+                        dir_path.display(),
+                        err
+                    );
+                    continue;
+                }
+            };
 
-                    let metadata = match entry.metadata() {
-                        Ok(ok) => ok,
-                        Err(err) => {
-                            log::warn!(
-                                "failed to read metadata for entry at {}: {}",
-                                path.display(),
-                                err
-                            );
-                            return ignore::WalkState::Continue;
-                        }
-                    };
+            let file_name_os = entry.file_name();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(err) => {
+                    log::warn!(
+                        "failed to read file type for entry in {}: {}",
+                        dir_path.display(),
+                        err
+                    );
+                    continue;
+                }
+            };
 
-                    //TODO: use entry.into_path?
-                    if !callback(path, file_name, metadata) {
-                        return ignore::WalkState::Quit;
+            #[cfg(unix)]
+            let name_hidden = file_name_os.as_bytes().first() == Some(&b'.');
+            #[cfg(not(unix))]
+            let name_hidden = file_name_os
+                .to_str()
+                .is_some_and(|file_name| file_name.starts_with('.'));
+
+            let Some(name_matches) =
+                file_name_matches_search_os(&file_name_os, term, term_ascii, term_lower.as_deref())
+            else {
+                continue;
+            };
+
+            let needs_metadata =
+                name_matches || file_type.is_dir() || cfg!(target_os = "windows") && !show_hidden;
+            let metadata_opt = if needs_metadata {
+                match entry.metadata() {
+                    Ok(metadata) => Some(metadata),
+                    Err(err) => {
+                        let display_name = file_name_os.to_string_lossy();
+                        log::warn!(
+                            "failed to read metadata for entry {} in {}: {}",
+                            display_name,
+                            dir_path.display(),
+                            err
+                        );
+                        continue;
                     }
                 }
+            } else {
+                None
+            };
 
-                ignore::WalkState::Continue
-            })
-        });
+            let hidden = if name_hidden {
+                true
+            } else if !show_hidden && cfg!(target_os = "windows") {
+                metadata_opt.as_ref().is_some_and(hidden_attribute)
+            } else {
+                false
+            };
+
+            if !show_hidden && hidden {
+                continue;
+            }
+
+            if file_type.is_dir()
+                && metadata_opt.as_ref().is_none_or(|metadata| {
+                    metadata.dev() == root_dev.unwrap_or_else(|| metadata.dev())
+                })
+            {
+                pending_dirs.push(entry.path());
+            }
+
+            if name_matches {
+                let Some(metadata) = metadata_opt else {
+                    continue;
+                };
+                let path = entry.path();
+                let Some(file_name) = file_name_os.to_str() else {
+                    continue;
+                };
+                if !should_continue() {
+                    return;
+                }
+                if !callback(&path, file_name, metadata) {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 // This config statement is from trash::os_limited, inverted
@@ -1138,24 +1326,21 @@ pub fn scan_trash(sizes: IconSizes) -> Vec<Item> {
             // the file in Trash/files/ doesn't exist (race between list() and metadata(),
             // or orphaned .trashinfo files). Catch the panic so one bad entry doesn't
             // crash the whole scan.
-            let metadata =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    trash::os_limited::metadata(&entry)
-                }))
-                .unwrap_or_else(|_| {
-                    log::warn!(
-                        "trash::os_limited::metadata panicked for {:?} \
+            let metadata = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                trash::os_limited::metadata(&entry)
+            }))
+            .unwrap_or_else(|_| {
+                log::warn!(
+                    "trash::os_limited::metadata panicked for {:?} \
                          (orphaned or in-flight trash entry, skipping)",
-                        entry
-                    );
-                    Err(trash::Error::Unknown {
-                        description: "orphaned trash entry".into(),
-                    })
+                    entry
+                );
+                Err(trash::Error::Unknown {
+                    description: "orphaned trash entry".into(),
                 })
-                .inspect_err(|err| {
-                    log::warn!("failed to get metadata for trash item {entry:?}: {err}")
-                })
-                .ok()?;
+            })
+            .inspect_err(|err| log::warn!("failed to get metadata for trash item {entry:?}: {err}"))
+            .ok()?;
             let original_path = entry.original_path();
             let name = entry.name.to_string_lossy().into_owned();
             let display_name = Item::display_name(&name);
@@ -1899,7 +2084,8 @@ impl ItemThumbnail {
         // because the image crate does not support SVG and would just log an error.
         let is_svg = mime.subtype().as_str() == "svg+xml";
         // First try built-in image thumbnailer
-        if mime.type_() == mime::IMAGE && !is_svg && check_size("image", max_size_mb * 1000 * 1000) {
+        if mime.type_() == mime::IMAGE && !is_svg && check_size("image", max_size_mb * 1000 * 1000)
+        {
             // Check if image dimensions would exceed available memory budget
             // The GPU tiling system can handle large images, but we still need to decode them first
             let dimensions_ok = match image::image_dimensions(path) {
@@ -2600,6 +2786,8 @@ pub struct Tab {
     pub edit_location: Option<EditLocation>,
     pub edit_location_id: widget::Id,
     pub location_focused: bool,
+    pub search_input: Option<String>,
+    search_generation: Arc<atomic::AtomicU64>,
     pub history_i: usize,
     pub history: Vec<Location>,
     pub config: TabConfig,
@@ -2689,6 +2877,12 @@ pub fn parse_hidden_file(path: &PathBuf) -> Box<[String]> {
 }
 
 impl Tab {
+    pub fn cancel_search_scan(&mut self) {
+        self.search_generation
+            .fetch_add(1, atomic::Ordering::SeqCst);
+        self.search_context = None;
+    }
+
     pub fn new(
         location: Location,
         config: TabConfig,
@@ -2722,6 +2916,11 @@ impl Tab {
             edit_location: None,
             edit_location_id: widget::Id::unique(),
             location_focused: false,
+            search_input: match &history[0] {
+                Location::Search(_, term, ..) => Some(term.clone()),
+                _ => None,
+            },
+            search_generation: Arc::new(atomic::AtomicU64::new(0)),
             history_i: 0,
             history,
             config,
@@ -3109,9 +3308,14 @@ impl Tab {
     }
 
     pub fn change_location(&mut self, location: &Location, history_i_opt: Option<usize>) {
+        self.cancel_search_scan();
         self.location = location.normalize();
         self.location_ancestors = self.location.ancestors();
         self.location_title = self.location.title();
+        self.search_input = match &self.location {
+            Location::Search(_, term, ..) => Some(term.clone()),
+            _ => None,
+        };
         self.context_menu = None;
         // Clear edit mode on navigation; bar displays self.location when None
         self.edit_location = None;
@@ -3971,7 +4175,10 @@ impl Tab {
                                 //TODO: combine this with column_sort logic, they must match!
                                 let item_modified = metadata.modified().ok();
                                 let index = match items.binary_search_by(|other| {
-                                    item_modified.cmp(&other.metadata.modified())
+                                    search_result_insert_cmp(
+                                        item_modified,
+                                        other.metadata.modified(),
+                                    )
                                 }) {
                                     Ok(index) => index,
                                     Err(index) => index,
@@ -3980,7 +4187,12 @@ impl Tab {
                                     //TODO: use correct IconSizes
                                     items.insert(
                                         index,
-                                        item_from_entry(path, name, metadata, IconSizes::default()),
+                                        item_from_search_entry(
+                                            path,
+                                            name,
+                                            metadata,
+                                            IconSizes::default(),
+                                        ),
                                     );
                                 }
                                 // Ensure that updates make it to the GUI in a timely manner
@@ -4696,11 +4908,10 @@ impl Tab {
             View::Grid => ("view-list-symbolic", Action::TabViewList),
             View::List => ("view-grid-symbolic", Action::TabViewGrid),
         };
-        let view_button =
-            widget::button::custom(widget::icon::from_name(view_icon).size(16))
-                .on_press(Message::ContextAction(next_view_action))
-                .padding(space_xxs)
-                .class(theme::Button::Icon);
+        let view_button = widget::button::custom(widget::icon::from_name(view_icon).size(16))
+            .on_press(Message::ContextAction(next_view_action))
+            .padding(space_xxs)
+            .class(theme::Button::Icon);
         row = row.push(view_button);
 
         let mut prev_button =
@@ -4804,7 +5015,8 @@ impl Tab {
                 };
                 (s, el.location.clone())
             } else {
-                let s = self.location
+                let s = self
+                    .location
                     .path_opt()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|| self.location.to_string());
@@ -4844,7 +5056,11 @@ impl Tab {
 
             let mut popover =
                 widget::popover(text_input).position(widget::popover::Position::Bottom);
-            if let Some(completions) = self.edit_location.as_ref().and_then(|el| el.completions.as_ref()) {
+            if let Some(completions) = self
+                .edit_location
+                .as_ref()
+                .and_then(|el| el.completions.as_ref())
+            {
                 if !completions.is_empty() {
                     let mut column =
                         widget::column::with_capacity(completions.len()).padding(space_xxs);
@@ -4882,7 +5098,7 @@ impl Tab {
         }
 
         // Breadcrumb fallback — never reached (always-open bar returns above).
-        #[allow(unused_variables, unused_assignments)]
+        #[allow(unreachable_code, unused_variables, unused_assignments)]
         let mut w = 0.0f32;
         let mut children: Vec<Element<_>> = Vec::new();
         match &self.location {
@@ -6269,6 +6485,8 @@ impl Tab {
             let term = term.clone();
             let show_hidden = *show_hidden;
             let start = *start;
+            let search_generation = self.search_generation.clone();
+            let generation = search_generation.load(atomic::Ordering::SeqCst);
             subscriptions.push(Subscription::run_with_id(
                 location.clone(),
                 stream::channel(2, move |mut output| async move {
@@ -6276,6 +6494,7 @@ impl Tab {
                     let (results_tx, results_rx) = mpsc::channel(65536);
 
                     let ready = Arc::new(atomic::AtomicBool::new(false));
+                    let ready_batch = Arc::new(atomic::AtomicUsize::new(0));
                     let last_modified_opt = Arc::new(RwLock::new(None));
                     output
                         .send(Message::SearchContext(
@@ -6316,6 +6535,15 @@ impl Tab {
                                         metadata,
                                     )) {
                                         Ok(()) => {
+                                            let batch_len = ready_batch
+                                                .fetch_add(1, atomic::Ordering::SeqCst)
+                                                + 1;
+                                            let should_wake = batch_len == 1
+                                                || batch_len >= SEARCH_READY_BATCH_SIZE;
+                                            if !should_wake {
+                                                return true;
+                                            }
+                                            ready_batch.store(0, atomic::Ordering::SeqCst);
                                             if ready.swap(true, atomic::Ordering::SeqCst) {
                                                 true
                                             } else {
@@ -6333,6 +6561,7 @@ impl Tab {
                                         Err(_) => false,
                                     }
                                 },
+                                &|| search_generation.load(atomic::Ordering::SeqCst) == generation,
                             );
                             log::info!(
                                 "searched for {:?} in {} in {:?}",
@@ -6621,14 +6850,20 @@ fn text_editor_class(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io, path::PathBuf};
+    use std::{
+        fs, io,
+        path::PathBuf,
+        time::{Duration, SystemTime},
+    };
 
     use cosmic::{iced::mouse::ScrollDelta, iced_runtime::keyboard::Modifiers, widget};
     use log::{debug, trace};
     use tempfile::TempDir;
     use test_log::test;
 
-    use super::{Location, Message, Tab, respond_to_scroll_direction, scan_path};
+    use super::{
+        Location, Message, Tab, respond_to_scroll_direction, scan_path, search_result_insert_cmp,
+    };
     use crate::{
         app::test_utils::{
             NAME_LEN, NUM_DIRS, NUM_FILES, NUM_HIDDEN, NUM_NESTED, assert_eq_tab_path, empty_fs,
@@ -7006,6 +7241,36 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn search_result_insert_keeps_descending_modified_order() {
+        let mut modified_times = vec![
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(30)),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
+            None,
+        ];
+
+        let inserted = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(25));
+        let index = match modified_times
+            .binary_search_by(|other| search_result_insert_cmp(inserted, *other))
+        {
+            Ok(index) => index,
+            Err(index) => index,
+        };
+        modified_times.insert(index, inserted);
+
+        assert_eq!(
+            modified_times,
+            vec![
+                Some(SystemTime::UNIX_EPOCH + Duration::from_secs(30)),
+                Some(SystemTime::UNIX_EPOCH + Duration::from_secs(25)),
+                Some(SystemTime::UNIX_EPOCH + Duration::from_secs(20)),
+                Some(SystemTime::UNIX_EPOCH + Duration::from_secs(10)),
+                None,
+            ]
+        );
     }
 
     #[test]

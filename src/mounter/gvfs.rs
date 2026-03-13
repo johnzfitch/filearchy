@@ -6,6 +6,7 @@ use cosmic::{
 use gio::{glib, prelude::*};
 use std::{any::TypeId, cell::Cell, future::pending, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, mpsc};
+use url::Url;
 
 use super::{Mounter, MounterAuth, MounterItem, MounterItems, MounterMessage};
 use crate::{
@@ -32,6 +33,19 @@ fn resolve_uri(uri: &str) -> (String, gio::File) {
     }
 
     (uri.to_string(), file)
+}
+
+fn sanitize_uri_for_log(uri: &str) -> String {
+    match Url::parse(uri) {
+        Ok(mut parsed) => {
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                let _ = parsed.set_username("redacted");
+                let _ = parsed.set_password(None);
+            }
+            parsed.to_string()
+        }
+        Err(_) => uri.to_string(),
+    }
 }
 
 fn gio_icon_to_path(icon: &gio::Icon, size: u16) -> Option<PathBuf> {
@@ -525,28 +539,16 @@ impl Gvfs {
                             };
 
                             if needs_mount {
-                                let mount_op = mount_op(resolved_uri.clone(), event_tx.clone());
-                                let event_tx = event_tx.clone();
-                                file.mount_enclosing_volume(
-                                    gio::MountMountFlags::empty(),
-                                    Some(&mount_op),
-                                    gio::Cancellable::NONE,
-                                    move |res| {
-                                        log::info!("network scan mounted {resolved_uri}: result {res:?}");
-                                        // FIXME sometimes a uri can be mounted and then not recognized as mounted...
-                                        // seems to be related to uri with a path
-                                        items_tx.blocking_send(network_scan(&uri, sizes)).unwrap();
-                                        event_tx.send(Event::NetworkResult(resolved_uri, match res {
-                                            Ok(()) => {
-                                                Ok(true)
-                                            },
-                                            Err(err) => match err.kind::<gio::IOErrorEnum>() {
-                                                Some(gio::IOErrorEnum::FailedHandled) => Ok(false),
-                                                _ => Err(format!("{err}"))
-                                            }
-                                        })).unwrap();
-                                    }
+                                let safe_uri = sanitize_uri_for_log(&resolved_uri);
+                                log::info!(
+                                    "skipping background mount for network scan of {safe_uri}"
                                 );
+                                items_tx
+                                    .send(Err(format!(
+                                        "network location is not mounted: {safe_uri}"
+                                    )))
+                                    .await
+                                    .unwrap();
                             } else {
                                 items_tx.send(network_scan(&uri, sizes)).await.unwrap();
                             }

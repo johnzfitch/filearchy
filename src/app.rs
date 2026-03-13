@@ -70,7 +70,10 @@ use wayland_client::{Proxy, protocol::wl_output::WlOutput};
 
 use crate::{
     FxOrderMap,
-    clipboard::{ClipboardCopy, ClipboardKind, ClipboardPaste, ClipboardPasteImage, ClipboardPasteVideo, ClipboardPasteText},
+    clipboard::{
+        ClipboardCopy, ClipboardKind, ClipboardPaste, ClipboardPasteImage, ClipboardPasteText,
+        ClipboardPasteVideo,
+    },
     config::{
         AppTheme, Config, DesktopConfig, Favorite, IconSizes, TIME_CONFIG_ID, TabConfig,
         TimeConfig, TypeToSearch,
@@ -101,6 +104,37 @@ use crate::{
 /// Minimum search term length before a recursive search is triggered.
 /// Prevents searching on every single character when the term is too short to be useful.
 const SEARCH_MIN_LEN: usize = 2;
+const SEARCH_DEBOUNCE_MS: u64 = 200;
+
+fn key_is_character(key: &Key, expected: &str) -> bool {
+    matches!(key, Key::Character(chars) if chars.eq_ignore_ascii_case(expected))
+}
+
+fn should_forward_captured_key(key: &Key, modifiers: Modifiers) -> bool {
+    if matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert)) {
+        return true;
+    }
+
+    if !modifiers.alt()
+        && ((modifiers.logo()
+            && !modifiers.control()
+            && (key_is_character(key, "c")
+                || key_is_character(key, "x")
+                || key_is_character(key, "v")))
+            || (modifiers.control()
+                && !modifiers.logo()
+                && (key_is_character(key, "c")
+                    || key_is_character(key, "x")
+                    || key_is_character(key, "v"))))
+    {
+        return true;
+    }
+
+    matches!(key, Key::Character(_))
+        && !modifiers.logo()
+        && !modifiers.control()
+        && !modifiers.alt()
+}
 
 static PERMANENT_DELETE_BUTTON_ID: LazyLock<widget::Id> =
     LazyLock::new(|| widget::Id::new("permanent-delete-button"));
@@ -424,6 +458,7 @@ pub enum Message {
     SearchClear,
     SearchFocus(bool),
     SearchInput(String),
+    SearchInputDebounced(Entity, String),
     SetShowDetails(bool),
     SetTypeToSearch(TypeToSearch),
     SystemThemeModeChange,
@@ -1136,9 +1171,14 @@ impl App {
         scrollable_id: widget::Id,
         window_id: Option<window::Id>,
     ) -> (Entity, Task<Message>) {
+        let mut tab_config = self.config.tab;
+        if matches!(self.mode, Mode::App) {
+            // App tabs always start in list view even if an existing tab was switched to grid.
+            tab_config.view = tab::View::List;
+        }
         let mut tab = Tab::new(
             location.clone(),
-            self.config.tab,
+            tab_config,
             self.config.thumb_cfg,
             Some(&self.state.sort_names),
             scrollable_id,
@@ -1428,6 +1468,50 @@ impl App {
             Location::Search(_, term, ..) => Some(term),
             _ => None,
         }
+    }
+
+    fn search_input_get(&self) -> Option<&str> {
+        let entity = self.tab_model.active();
+        self.tab_model
+            .data::<Tab>(entity)
+            .and_then(|tab| tab.search_input.as_deref())
+    }
+
+    fn search_input_set(&mut self, tab: Entity, input: Option<String>) {
+        if let Some(tab) = self.tab_model.data_mut::<Tab>(tab) {
+            tab.search_input = input;
+        }
+    }
+
+    fn search_invalidate(&mut self, tab: Entity) -> Task<Message> {
+        if let Some(tab) = self.tab_model.data_mut::<Tab>(tab) {
+            tab.cancel_search_scan();
+        }
+        Task::none()
+    }
+
+    fn search_close(&mut self, tab: Entity) -> Task<Message> {
+        let _ = self.search_invalidate(tab);
+        if self
+            .tab_model
+            .data::<Tab>(tab)
+            .is_some_and(|tab| matches!(tab.location, Location::Search(..)))
+        {
+            self.search_set(tab, None, None)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn search_schedule(&mut self, tab: Entity, input: String) -> Task<Message> {
+        let debounced_input = input.clone();
+        let debounce = Task::perform(
+            tokio::time::sleep(Duration::from_millis(SEARCH_DEBOUNCE_MS)),
+            move |()| {
+                cosmic::Action::App(Message::SearchInputDebounced(tab, debounced_input.clone()))
+            },
+        );
+        Task::batch([self.search_invalidate(tab), debounce])
     }
 
     fn search_set_active(&mut self, term_opt: Option<String>) -> Task<Message> {
@@ -2316,6 +2400,7 @@ impl Application for App {
             commands.push(app.open_tab(location, true, None));
         }
         for location in flags.uris {
+            let uri = location.as_str().to_string();
             if let Some(e) = app.nav_model.iter().find(|e| {
                 app.nav_model.data::<Location>(*e).is_some_and(
                     |l| matches!(l, Location::Network(uri, ..) if *uri == *location.as_str()),
@@ -2324,6 +2409,8 @@ impl Application for App {
                 commands.push(cosmic::task::message(cosmic::Action::App(
                     Message::NetworkDriveOpenEntityAfterMount { entity: e },
                 )));
+            } else {
+                commands.push(app.open_tab(Location::Network(uri.clone(), uri, None), true, None));
             }
         }
 
@@ -2448,6 +2535,29 @@ impl Application for App {
         self.nav_model.activate(entity);
         if let Some(location) = self.nav_model.data::<Location>(entity) {
             let should_open = match location {
+                #[cfg(feature = "gvfs")]
+                Location::Network(uri, _, None) => {
+                    if let Some(key) = self
+                        .mounter_items
+                        .iter()
+                        .find_map(|(k, items)| {
+                            items
+                                .iter()
+                                .any(|item| item.uri() == *uri && !item.is_mounted())
+                                .then_some(*k)
+                        })
+                        .or_else(|| self.mounter_items.keys().copied().next())
+                    {
+                        if let Some(mounter) = MOUNTERS.get(&key) {
+                            return mounter.network_drive(uri.clone()).map(move |()| {
+                                cosmic::Action::App(Message::NetworkDriveOpenEntityAfterMount {
+                                    entity,
+                                })
+                            });
+                        }
+                    }
+                    true
+                }
                 #[cfg(feature = "gvfs")]
                 Location::Network(uri, name, Some(path))
                     if !path.try_exists().unwrap_or_default() =>
@@ -2586,9 +2696,13 @@ impl Application for App {
             self.set_show_context(false);
             return cosmic::task::message(cosmic::action::app(Message::SetShowDetails(false)));
         }
-        if self.search_get().is_some() {
+        if self.search_input_get().is_some() {
             // Close search if open
-            return self.search_set_active(None);
+            self.search_input_set(entity, None);
+            if self.search_get().is_some() {
+                return self.search_set_active(None);
+            }
+            return Task::none();
         }
         if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
             if tab.context_menu.is_some() {
@@ -3101,10 +3215,8 @@ impl Application for App {
                     let editing_search = self.search_focused;
                     let dialog_open = self.dialog_pages.front().is_some();
                     let editing_text_input = editing_location || editing_search || dialog_open;
-                    let is_insert = matches!(
-                        key,
-                        Key::Named(cosmic::iced::keyboard::key::Named::Insert)
-                    );
+                    let is_insert =
+                        matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert));
 
                     if is_insert && editing_text_input {
                         if modifiers.shift() && !modifiers.control() {
@@ -3129,22 +3241,28 @@ impl Application for App {
                             // Ctrl+Insert: copy current text input content to clipboard
                             if editing_location {
                                 if let Some(tab) = self.tab_model.data::<Tab>(entity) {
-                                    let text = tab.edit_location.as_ref()
+                                    let text = tab
+                                        .edit_location
+                                        .as_ref()
                                         .map(|el| match &el.location {
                                             Location::Network(uri, ..) => uri.clone(),
-                                            loc => loc.path_opt()
+                                            loc => loc
+                                                .path_opt()
                                                 .map(|p| p.to_string_lossy().into_owned())
                                                 .unwrap_or_default(),
                                         })
-                                        .or_else(|| tab.location.path_opt()
-                                            .map(|p| p.to_string_lossy().into_owned()))
+                                        .or_else(|| {
+                                            tab.location
+                                                .path_opt()
+                                                .map(|p| p.to_string_lossy().into_owned())
+                                        })
                                         .unwrap_or_default();
                                     if !text.is_empty() {
                                         return clipboard::write(text);
                                     }
                                 }
                             } else if editing_search {
-                                let text = self.search_get().unwrap_or_default().to_string();
+                                let text = self.search_input_get().unwrap_or_default().to_string();
                                 if !text.is_empty() {
                                     return clipboard::write(text);
                                 }
@@ -3155,7 +3273,10 @@ impl Application for App {
 
                     // Backspace while editing text should not trigger HistoryPrevious
                     if editing_text_input
-                        && matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Backspace))
+                        && matches!(
+                            key,
+                            Key::Named(cosmic::iced::keyboard::key::Named::Backspace)
+                        )
                     {
                         return Task::none();
                     }
@@ -3173,20 +3294,27 @@ impl Application for App {
                         }
                     }
 
-                    // Uncaptured keys with only shift modifiers go to the search or location box
+                    // Printable keys should still work for type-to-search even if a focused
+                    // widget captured the event first.
                     if matches!(self.mode, Mode::App)
+                        && !editing_text_input
                         && !modifiers.logo()
                         && !modifiers.control()
                         && !modifiers.alt()
                         && matches!(key, Key::Character(_))
                     {
-                        if let Some(text) = text {
+                        let input = text.as_ref().map(|s| s.as_str()).or_else(|| match &key {
+                            Key::Character(chars) => Some(chars.as_str()),
+                            _ => None,
+                        });
+                        if let Some(text) = input {
                             match self.config.type_to_search {
                                 TypeToSearch::Recursive => {
                                     let mut term =
-                                        self.search_get().unwrap_or_default().to_string();
-                                    term.push_str(&text);
-                                    return self.search_set_active(Some(term));
+                                        self.search_input_get().unwrap_or_default().to_string();
+                                    term.push_str(text);
+                                    self.search_input_set(entity, Some(term.clone()));
+                                    return self.search_schedule(entity, term);
                                 }
                                 TypeToSearch::EnterPath => {
                                     if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
@@ -3197,13 +3325,13 @@ impl Application for App {
                                         // Try to add text to end of location
                                         if let Location::Network(uri, ..) = location {
                                             let mut uri_string = uri.clone();
-                                            uri_string.push_str(&text);
+                                            uri_string.push_str(text);
                                             tab.edit_location =
                                                 Some(location.with_uri(uri_string).into());
                                         } else if let Some(path) = location.path_opt() {
                                             let mut path_string =
                                                 path.to_string_lossy().into_owned();
-                                            path_string.push_str(&text);
+                                            path_string.push_str(text);
                                             tab.edit_location =
                                                 Some(location.with_path(path_string.into()).into());
                                         }
@@ -4080,35 +4208,53 @@ impl Application for App {
                 ));
             }
             Message::SearchActivate => {
-                return if self.search_get().is_none() {
-                    self.search_set_active(Some(String::new()))
+                let entity = self.tab_model.active();
+                return if self.search_input_get().is_none() {
+                    self.search_input_set(entity, Some(String::new()));
+                    widget::text_input::focus(self.search_id.clone())
                 } else {
                     widget::text_input::focus(self.search_id.clone())
                 };
             }
             Message::SearchClear => {
+                let entity = self.tab_model.active();
                 self.search_focused = false;
-                return self.search_set_active(None);
+                self.search_input_set(entity, None);
+                return self.search_close(entity);
             }
             Message::SearchFocus(focused) => {
                 self.search_focused = focused;
             }
             Message::SearchInput(input) => {
+                let entity = self.tab_model.active();
                 self.search_focused = true;
+                self.search_input_set(entity, Some(input.clone()));
                 // Don't re-run a search that's already active with the exact same term.
                 // This prevents double-firing from on_input + on_paste both triggering.
                 if self.search_get() == Some(input.as_str()) {
                     return Task::none();
                 }
                 // Don't trigger a search until the term is long enough to be useful.
-                // If the term is shortened back below the minimum, cancel any active search.
+                // If the term is shortened back below the minimum, cancel any active search
+                // but keep the search box open so the next character can be typed.
                 if input.len() < SEARCH_MIN_LEN {
-                    if self.search_get().is_some() {
-                        return self.search_set_active(None);
-                    }
+                    let clear = self.search_close(entity);
+                    self.search_input_set(entity, Some(input));
+                    return Task::batch([clear, widget::text_input::focus(self.search_id.clone())]);
+                }
+                return self.search_schedule(entity, input);
+            }
+            Message::SearchInputDebounced(tab, input) => {
+                if self.tab_model.active() != tab {
                     return Task::none();
                 }
-                return self.search_set_active(Some(input));
+                if self.search_input_get() != Some(input.as_str()) {
+                    return Task::none();
+                }
+                if input.len() < SEARCH_MIN_LEN {
+                    return Task::none();
+                }
+                return self.search_set(tab, Some(input), None);
             }
             Message::SetShowDetails(show_details) => {
                 config_set!(show_details, show_details);
@@ -4495,11 +4641,6 @@ impl Application for App {
                 if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
                     tab.config.view = view;
                 }
-                // Save view preference without triggering a full update_config cycle
-                // (which would rebuild the nav model and set theme unnecessarily)
-                let mut config = self.config.tab;
-                config.view = view;
-                config_set!(tab, config);
             }
             Message::CutPaths(paths) => {
                 if let Some(tab) = self.tab_model.active_data_mut::<Tab>() {
@@ -4579,12 +4720,43 @@ impl Application for App {
                 return window::maximize(id, maximized);
             }
             Message::WindowNew => match env::current_exe() {
-                Ok(exe) => match process::Command::new(&exe).spawn() {
-                    Ok(_child) => {}
-                    Err(err) => {
-                        log::error!("failed to execute {}: {}", exe.display(), err);
+                Ok(exe) => {
+                    // initialize command to spawn another instance of this application
+                    let mut command = process::Command::new(&exe);
+
+                    // make the new window open at the same location as the currently active tab by
+                    // passing respective command line arguments
+                    let entity = self.tab_model.active();
+                    let active_tab_location =
+                        self.tab_model.data::<Tab>(entity).map(|tab| &tab.location);
+                    match active_tab_location {
+                        Some(
+                            Location::Desktop(path, ..)
+                            | Location::Path(path)
+                            | Location::Search(path, ..),
+                        ) => {
+                            command.arg(path);
+                        }
+                        Some(Location::Network(uri, ..)) => {
+                            command.arg(uri);
+                        }
+                        Some(Location::Recents) => {
+                            command.arg("--recents");
+                        }
+                        Some(Location::Trash) => {
+                            command.arg("--trash");
+                        }
+                        None => {}
+                    };
+
+                    // spawn the new window
+                    match command.spawn() {
+                        Ok(_child) => {}
+                        Err(err) => {
+                            log::error!("failed to execute {}: {}", exe.display(), err);
+                        }
                     }
-                },
+                }
                 Err(err) => {
                     log::error!("failed to get current executable path: {err}");
                 }
@@ -6004,7 +6176,7 @@ impl Application for App {
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
         let mut elements = Vec::with_capacity(2);
 
-        if let Some(term) = self.search_get() {
+        if let Some(term) = self.search_input_get() {
             if self.core.is_condensed() {
                 elements.push(
                     //TODO: selected state is not appearing different
@@ -6048,7 +6220,7 @@ impl Application for App {
         let mut tab_column = widget::column::with_capacity(4);
 
         if self.core.is_condensed() {
-            if let Some(term) = self.search_get() {
+            if let Some(term) = self.search_input_get() {
                 tab_column = tab_column.push(
                     widget::container(
                         widget::text_input::search_input("", term)
@@ -6216,10 +6388,8 @@ impl Application for App {
                 }) => match status {
                     // Only forward uncaptured key events (captured means a widget handled it)
                     event::Status::Ignored => Some(Message::Key(window_id, modifiers, key, text)),
-                    // Exception: Always forward Insert key for omarchy clipboard bindings
-                    // (Super+C/V send Ctrl/Shift+Insert via sendshortcut)
                     event::Status::Captured => {
-                        if matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert)) {
+                        if should_forward_captured_key(&key, modifiers) {
                             Some(Message::Key(window_id, modifiers, key, text))
                         } else {
                             None

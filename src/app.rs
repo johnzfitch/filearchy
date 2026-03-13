@@ -104,6 +104,7 @@ use crate::{
 /// Minimum search term length before a recursive search is triggered.
 /// Prevents searching on every single character when the term is too short to be useful.
 const SEARCH_MIN_LEN: usize = 2;
+const SEARCH_DEBOUNCE_MS: u64 = 200;
 
 fn key_is_character(key: &Key, expected: &str) -> bool {
     matches!(key, Key::Character(chars) if chars.eq_ignore_ascii_case(expected))
@@ -457,6 +458,7 @@ pub enum Message {
     SearchClear,
     SearchFocus(bool),
     SearchInput(String),
+    SearchInputDebounced(Entity, String),
     SetShowDetails(bool),
     SetTypeToSearch(TypeToSearch),
     SystemThemeModeChange,
@@ -1169,9 +1171,14 @@ impl App {
         scrollable_id: widget::Id,
         window_id: Option<window::Id>,
     ) -> (Entity, Task<Message>) {
+        let mut tab_config = self.config.tab;
+        if matches!(self.mode, Mode::App) {
+            // App tabs always start in list view even if an existing tab was switched to grid.
+            tab_config.view = tab::View::List;
+        }
         let mut tab = Tab::new(
             location.clone(),
-            self.config.tab,
+            tab_config,
             self.config.thumb_cfg,
             Some(&self.state.sort_names),
             scrollable_id,
@@ -1461,6 +1468,50 @@ impl App {
             Location::Search(_, term, ..) => Some(term),
             _ => None,
         }
+    }
+
+    fn search_input_get(&self) -> Option<&str> {
+        let entity = self.tab_model.active();
+        self.tab_model
+            .data::<Tab>(entity)
+            .and_then(|tab| tab.search_input.as_deref())
+    }
+
+    fn search_input_set(&mut self, tab: Entity, input: Option<String>) {
+        if let Some(tab) = self.tab_model.data_mut::<Tab>(tab) {
+            tab.search_input = input;
+        }
+    }
+
+    fn search_invalidate(&mut self, tab: Entity) -> Task<Message> {
+        if let Some(tab) = self.tab_model.data_mut::<Tab>(tab) {
+            tab.cancel_search_scan();
+        }
+        Task::none()
+    }
+
+    fn search_close(&mut self, tab: Entity) -> Task<Message> {
+        let _ = self.search_invalidate(tab);
+        if self
+            .tab_model
+            .data::<Tab>(tab)
+            .is_some_and(|tab| matches!(tab.location, Location::Search(..)))
+        {
+            self.search_set(tab, None, None)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn search_schedule(&mut self, tab: Entity, input: String) -> Task<Message> {
+        let debounced_input = input.clone();
+        let debounce = Task::perform(
+            tokio::time::sleep(Duration::from_millis(SEARCH_DEBOUNCE_MS)),
+            move |()| {
+                cosmic::Action::App(Message::SearchInputDebounced(tab, debounced_input.clone()))
+            },
+        );
+        Task::batch([self.search_invalidate(tab), debounce])
     }
 
     fn search_set_active(&mut self, term_opt: Option<String>) -> Task<Message> {
@@ -2645,9 +2696,13 @@ impl Application for App {
             self.set_show_context(false);
             return cosmic::task::message(cosmic::action::app(Message::SetShowDetails(false)));
         }
-        if self.search_get().is_some() {
+        if self.search_input_get().is_some() {
             // Close search if open
-            return self.search_set_active(None);
+            self.search_input_set(entity, None);
+            if self.search_get().is_some() {
+                return self.search_set_active(None);
+            }
+            return Task::none();
         }
         if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
             if tab.context_menu.is_some() {
@@ -3207,7 +3262,7 @@ impl Application for App {
                                     }
                                 }
                             } else if editing_search {
-                                let text = self.search_get().unwrap_or_default().to_string();
+                                let text = self.search_input_get().unwrap_or_default().to_string();
                                 if !text.is_empty() {
                                     return clipboard::write(text);
                                 }
@@ -3256,9 +3311,10 @@ impl Application for App {
                             match self.config.type_to_search {
                                 TypeToSearch::Recursive => {
                                     let mut term =
-                                        self.search_get().unwrap_or_default().to_string();
+                                        self.search_input_get().unwrap_or_default().to_string();
                                     term.push_str(text);
-                                    return self.search_set_active(Some(term));
+                                    self.search_input_set(entity, Some(term.clone()));
+                                    return self.search_schedule(entity, term);
                                 }
                                 TypeToSearch::EnterPath => {
                                     if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
@@ -4152,35 +4208,53 @@ impl Application for App {
                 ));
             }
             Message::SearchActivate => {
-                return if self.search_get().is_none() {
-                    self.search_set_active(Some(String::new()))
+                let entity = self.tab_model.active();
+                return if self.search_input_get().is_none() {
+                    self.search_input_set(entity, Some(String::new()));
+                    widget::text_input::focus(self.search_id.clone())
                 } else {
                     widget::text_input::focus(self.search_id.clone())
                 };
             }
             Message::SearchClear => {
+                let entity = self.tab_model.active();
                 self.search_focused = false;
-                return self.search_set_active(None);
+                self.search_input_set(entity, None);
+                return self.search_close(entity);
             }
             Message::SearchFocus(focused) => {
                 self.search_focused = focused;
             }
             Message::SearchInput(input) => {
+                let entity = self.tab_model.active();
                 self.search_focused = true;
+                self.search_input_set(entity, Some(input.clone()));
                 // Don't re-run a search that's already active with the exact same term.
                 // This prevents double-firing from on_input + on_paste both triggering.
                 if self.search_get() == Some(input.as_str()) {
                     return Task::none();
                 }
                 // Don't trigger a search until the term is long enough to be useful.
-                // If the term is shortened back below the minimum, cancel any active search.
+                // If the term is shortened back below the minimum, cancel any active search
+                // but keep the search box open so the next character can be typed.
                 if input.len() < SEARCH_MIN_LEN {
-                    if self.search_get().is_some() {
-                        return self.search_set_active(None);
-                    }
+                    let clear = self.search_close(entity);
+                    self.search_input_set(entity, Some(input));
+                    return Task::batch([clear, widget::text_input::focus(self.search_id.clone())]);
+                }
+                return self.search_schedule(entity, input);
+            }
+            Message::SearchInputDebounced(tab, input) => {
+                if self.tab_model.active() != tab {
                     return Task::none();
                 }
-                return self.search_set_active(Some(input));
+                if self.search_input_get() != Some(input.as_str()) {
+                    return Task::none();
+                }
+                if input.len() < SEARCH_MIN_LEN {
+                    return Task::none();
+                }
+                return self.search_set(tab, Some(input), None);
             }
             Message::SetShowDetails(show_details) => {
                 config_set!(show_details, show_details);
@@ -4567,11 +4641,6 @@ impl Application for App {
                 if let Some(tab) = self.tab_model.data_mut::<Tab>(entity) {
                     tab.config.view = view;
                 }
-                // Save view preference without triggering a full update_config cycle
-                // (which would rebuild the nav model and set theme unnecessarily)
-                let mut config = self.config.tab;
-                config.view = view;
-                config_set!(tab, config);
             }
             Message::CutPaths(paths) => {
                 if let Some(tab) = self.tab_model.active_data_mut::<Tab>() {
@@ -6107,7 +6176,7 @@ impl Application for App {
     fn header_end(&self) -> Vec<Element<'_, Self::Message>> {
         let mut elements = Vec::with_capacity(2);
 
-        if let Some(term) = self.search_get() {
+        if let Some(term) = self.search_input_get() {
             if self.core.is_condensed() {
                 elements.push(
                     //TODO: selected state is not appearing different
@@ -6151,7 +6220,7 @@ impl Application for App {
         let mut tab_column = widget::column::with_capacity(4);
 
         if self.core.is_condensed() {
-            if let Some(term) = self.search_get() {
+            if let Some(term) = self.search_input_get() {
                 tab_column = tab_column.push(
                     widget::container(
                         widget::text_input::search_input("", term)

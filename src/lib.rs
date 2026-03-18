@@ -36,6 +36,15 @@ pub(crate) fn err_str<T: ToString>(err: T) -> String {
     err.to_string()
 }
 
+fn init_logging() {
+    // Keep filearchy warnings visible by default while suppressing noisy dependency logs
+    // that are common on non-COSMIC desktops and specific GPU stacks.
+    const DEFAULT_LOG_FILTER: &str =
+        "warn,calloop::loop_logic=error,iced_futures::subscription::tracker=error,wgpu_hal=error";
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_LOG_FILTER))
+        .init();
+}
+
 pub fn desktop_dir() -> PathBuf {
     if let Some(path) = dirs::desktop_dir() {
         path
@@ -72,7 +81,7 @@ pub fn is_wayland() -> bool {
 /// Runs application in desktop mode
 #[rustfmt::skip]
 pub fn desktop() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    init_logging();
 
     localize::localize();
 
@@ -107,7 +116,7 @@ pub fn desktop() -> Result<(), Box<dyn std::error::Error>> {
 /// Runs application with these settings
 #[rustfmt::skip]
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    init_logging();
 
     localize::localize();
 

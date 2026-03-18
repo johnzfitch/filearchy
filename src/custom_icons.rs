@@ -84,19 +84,28 @@ static MIME_ICON_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::
     // Documents
     map.insert("application/pdf", "application-pdf.png");
     map.insert("application/msword", "application-msword.png");
-    map.insert("application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-               "application-vnd.openxmlformats-officedocument.wordprocessingml.document.png");
+    map.insert(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application-vnd.openxmlformats-officedocument.wordprocessingml.document.png",
+    );
     map.insert("application/rtf", "application-rtf.png");
     map.insert("text/rtf", "text-rtf.png");
     map.insert("application/epub+zip", "book-48x48.png");
 
     // Spreadsheets & Presentations
     map.insert("application/vnd.ms-excel", "application-vnd.ms-excel.png");
-    map.insert("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-               "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet.png");
-    map.insert("application/vnd.ms-powerpoint", "application-vnd.ms-powerpoint.png");
-    map.insert("application/vnd.openxmlformats-officedocument.presentationml.presentation",
-               "application-vnd.openxmlformats-officedocument.presentationml.presentation.png");
+    map.insert(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application-vnd.openxmlformats-officedocument.spreadsheetml.sheet.png",
+    );
+    map.insert(
+        "application/vnd.ms-powerpoint",
+        "application-vnd.ms-powerpoint.png",
+    );
+    map.insert(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application-vnd.openxmlformats-officedocument.presentationml.presentation.png",
+    );
 
     // Images
     map.insert("image/png", "picture-48x48.png");
@@ -140,9 +149,15 @@ static MIME_ICON_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::
 
     // System & Special
     map.insert("application/x-executable", "application-x-executable.png");
-    map.insert("application/x-ms-dos-executable", "application-x-ms-dos-executable.png");
+    map.insert(
+        "application/x-ms-dos-executable",
+        "application-x-ms-dos-executable.png",
+    );
     map.insert("application/x-pem-file", "application-x-pem-file.png");
-    map.insert("application/x-x509-ca-cert", "application-x-x509-ca-cert.png");
+    map.insert(
+        "application/x-x509-ca-cert",
+        "application-x-x509-ca-cert.png",
+    );
     map.insert("text/plain", "text-plain.png");
     map.insert("text/x-log", "text-x-log.png");
     map.insert("inode/directory", "folder-48x48.png");
@@ -164,16 +179,12 @@ pub fn get_custom_icon(mime_type: &str, size: u16) -> Option<icon::Handle> {
 
                 // Only scale if the requested size differs from native size
                 if size as u32 != native_size {
-                    let resized = img.resize_exact(
-                        size as u32,
-                        size as u32,
-                        FilterType::Lanczos3
-                    );
+                    let resized = img.resize_exact(size as u32, size as u32, FilterType::Lanczos3);
                     let rgba = resized.into_rgba8();
                     return Some(icon::from_raster_pixels(
                         size as u32,
                         size as u32,
-                        rgba.into_raw()
+                        rgba.into_raw(),
                     ));
                 }
             }
@@ -295,16 +306,12 @@ pub mod ui {
 
                 // Only scale if the requested size differs from native size
                 if size as u32 != native_size {
-                    let resized = img.resize_exact(
-                        size as u32,
-                        size as u32,
-                        FilterType::Lanczos3
-                    );
+                    let resized = img.resize_exact(size as u32, size as u32, FilterType::Lanczos3);
                     let rgba = resized.into_rgba8();
                     return Some(icon::from_raster_pixels(
                         size as u32,
                         size as u32,
-                        rgba.into_raw()
+                        rgba.into_raw(),
                     ));
                 }
             }

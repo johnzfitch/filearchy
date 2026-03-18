@@ -107,6 +107,9 @@ impl ThumbnailerCache {
                             .map(|entry| entry.path())
                     }));
                 }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    log::trace!("thumbnailer directory does not exist: {}", dir.display());
+                }
                 Err(err) => {
                     log::warn!("failed to read directory {}: {}", dir.display(), err);
                 }

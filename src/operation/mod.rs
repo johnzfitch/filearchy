@@ -679,9 +679,10 @@ impl Operation {
                                 let total_paths = paths.len();
                                 for (i, path) in paths.iter().enumerate() {
                                     futures::executor::block_on(async {
-                                        controller.check().await.map_err(|e| {
-                                            OperationError::from_state(e, &controller)
-                                        })
+                                        controller
+                                            .check()
+                                            .await
+                                            .map_err(|e| OperationError::from_state(e, &controller))
                                     })?;
                                     controller.set_progress((i as f32) / total_paths as f32);
                                     if let Some(relative_path) = path
@@ -707,7 +708,9 @@ impl Operation {
                             ArchiveType::TarBz2 => {
                                 let mut archive = fs::File::create(&to)
                                     .map(io::BufWriter::new)
-                                    .map(|w| bzip2::write::BzEncoder::new(w, bzip2::Compression::best()))
+                                    .map(|w| {
+                                        bzip2::write::BzEncoder::new(w, bzip2::Compression::best())
+                                    })
                                     .map(tar::Builder::new)
                                     .map_err(|e| OperationError::from_err(e, &controller))?;
                                 tar_append!(archive);
@@ -727,15 +730,19 @@ impl Operation {
                                 let file = fs::File::create(&to)
                                     .map(io::BufWriter::new)
                                     .map_err(|e| OperationError::from_err(e, &controller))?;
-                                let xz = lzma_rust2::XzWriter::new(file, lzma_rust2::XzOptions::default())
-                                    .map_err(|e| OperationError::from_err(e, &controller))?;
+                                let xz = lzma_rust2::XzWriter::new(
+                                    file,
+                                    lzma_rust2::XzOptions::default(),
+                                )
+                                .map_err(|e| OperationError::from_err(e, &controller))?;
                                 let mut archive = tar::Builder::new(xz);
                                 let total_paths = paths.len();
                                 for (i, path) in paths.iter().enumerate() {
                                     futures::executor::block_on(async {
-                                        controller.check().await.map_err(|e| {
-                                            OperationError::from_state(e, &controller)
-                                        })
+                                        controller
+                                            .check()
+                                            .await
+                                            .map_err(|e| OperationError::from_state(e, &controller))
                                     })?;
                                     controller.set_progress((i as f32) / total_paths as f32);
                                     if let Some(relative_path) = path
@@ -745,7 +752,9 @@ impl Operation {
                                     {
                                         archive
                                             .append_path_with_name(path, relative_path)
-                                            .map_err(|e| OperationError::from_err(e, &controller))?;
+                                            .map_err(|e| {
+                                                OperationError::from_err(e, &controller)
+                                            })?;
                                     }
                                 }
                                 // Finish tar stream, get inner XzWriter, then finalize xz stream

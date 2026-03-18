@@ -225,7 +225,9 @@ pub fn context_menu<'a>(
                 //TODO: Print?
                 children.push(menu_item(fl!("show-details"), Action::Preview).into());
                 // Only show "Add to sidebar" when all selected items are directories
-                if matches!(tab.mode, tab::Mode::App) && selected == selected_dir && selected_dir > 0
+                if matches!(tab.mode, tab::Mode::App)
+                    && selected == selected_dir
+                    && selected_dir > 0
                 {
                     children.push(divider::horizontal::light().into());
                     children.push(menu_item(fl!("add-to-sidebar"), Action::AddToSidebar).into());

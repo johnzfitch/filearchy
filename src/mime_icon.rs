@@ -59,8 +59,7 @@ impl MimeIconCache {
                     };
 
                     // Try custom_icons for the generic type first
-                    if let Some(custom_handle) =
-                        custom_icons::ui::get_icon(generic_icon, key.size)
+                    if let Some(custom_handle) = custom_icons::ui::get_icon(generic_icon, key.size)
                     {
                         return Some(custom_handle);
                     }
@@ -83,10 +82,8 @@ impl MimeIconCache {
                 let mut fallback_names: Vec<std::borrow::Cow<'_, str>> =
                     icon_names.into_iter().map(std::borrow::Cow::from).collect();
                 // Always add generic fallbacks at the end
-                fallback_names.extend([
-                    FALLBACK_MIME_ICON.into(),
-                    "application-octet-stream".into(),
-                ]);
+                fallback_names
+                    .extend([FALLBACK_MIME_ICON.into(), "application-octet-stream".into()]);
                 named = named.fallback(Some(icon::IconFallback::Names(fallback_names)));
                 Some(named.handle())
             })

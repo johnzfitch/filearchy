@@ -105,6 +105,9 @@ use crate::{
 /// Prevents searching on every single character when the term is too short to be useful.
 const SEARCH_MIN_LEN: usize = 2;
 const SEARCH_DEBOUNCE_MS: u64 = 200;
+const NAV_BAR_MIN_WIDTH: f32 = 120.0;
+const NAV_BAR_MAX_WIDTH: f32 = 280.0;
+const NAV_BAR_PRIORITY_MARGIN: f32 = 16.0;
 
 fn key_is_character(key: &Key, expected: &str) -> bool {
     matches!(key, Key::Character(chars) if chars.eq_ignore_ascii_case(expected))
@@ -531,6 +534,58 @@ pub enum ArchiveType {
     Tgz,
     #[default]
     Zip,
+}
+
+fn app_event_message(event: Event, status: event::Status, window_id: WindowId) -> Option<Message> {
+    match event {
+        Event::Keyboard(KeyEvent::KeyPressed {
+            key,
+            modifiers,
+            text,
+            ..
+        }) => match status {
+            // Only forward uncaptured key events (captured means a widget handled it)
+            event::Status::Ignored => Some(Message::Key(window_id, modifiers, key, text)),
+            event::Status::Captured => {
+                if should_forward_captured_key(&key, modifiers) {
+                    Some(Message::Key(window_id, modifiers, key, text))
+                } else {
+                    None
+                }
+            }
+        },
+        Event::Keyboard(KeyEvent::ModifiersChanged(modifiers)) => {
+            Some(Message::ModifiersChanged(window_id, modifiers))
+        }
+        Event::Window(WindowEvent::CloseRequested) => Some(Message::WindowClose),
+        Event::Window(WindowEvent::Opened { position: _, size }) => {
+            Some(Message::Size(window_id, size))
+        }
+        Event::Window(WindowEvent::Resized(size)) => Some(Message::Size(window_id, size)),
+        _ => None,
+    }
+}
+
+#[cfg(all(feature = "wayland", feature = "desktop-applet"))]
+fn desktop_event_message(
+    event: Event,
+    _status: event::Status,
+    window_id: WindowId,
+) -> Option<Message> {
+    match event {
+        Event::Window(WindowEvent::Focused) => Some(Message::Focused(window_id)),
+        Event::PlatformSpecific(event::PlatformSpecific::Wayland(wayland_event)) => {
+            match wayland_event {
+                WaylandEvent::Output(output_event, output) => {
+                    Some(Message::OutputEvent(output_event, output))
+                }
+                #[cfg(feature = "desktop")]
+                WaylandEvent::OverlapNotify(event, ..) => Some(Message::Overlap(window_id, event)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 impl ArchiveType {
@@ -2430,6 +2485,15 @@ impl Application for App {
             return None;
         }
 
+        if !self.core.is_condensed()
+            && self.size.is_some_and(|size| {
+                size.width
+                    <= tab::LIST_COLUMNS_BREAKPOINT + NAV_BAR_MIN_WIDTH + NAV_BAR_PRIORITY_MARGIN
+            })
+        {
+            return None;
+        }
+
         let nav_model = self.nav_model()?;
 
         let mut nav = cosmic::widget::nav_bar(nav_model, |entity| {
@@ -2450,14 +2514,22 @@ impl Application for App {
         .close_icon(icon::from_name("media-eject-symbolic").size(16).icon())
         .into_container();
 
+        let nav_width = self
+            .size
+            .map(|size| {
+                (size.width - tab::LIST_COLUMNS_BREAKPOINT - NAV_BAR_PRIORITY_MARGIN)
+                    .clamp(NAV_BAR_MIN_WIDTH, NAV_BAR_MAX_WIDTH)
+            })
+            .unwrap_or(NAV_BAR_MAX_WIDTH);
         if !self.core.is_condensed() {
-            nav = nav.max_width(280);
+            nav = nav.max_width(nav_width);
         }
 
-        Some(Element::from(
-            // XXX both must be shrink to avoid flex layout from ignoring it
-            nav.width(Length::Shrink).height(Length::Shrink),
-        ))
+        Some(Element::from(if self.core.is_condensed() {
+            nav.width(Length::Shrink).height(Length::Shrink)
+        } else {
+            nav.width(Length::Fixed(nav_width)).height(Length::Shrink)
+        }))
     }
 
     fn nav_context_menu(
@@ -2917,6 +2989,10 @@ impl Application for App {
                 }
             }
             Message::DesktopViewOptions => {
+                if !matches!(self.mode, Mode::Desktop) {
+                    return Task::none();
+                }
+
                 let mut settings = window::Settings {
                     decorations: true,
                     min_size: Some(Size::new(360.0, 180.0)),
@@ -5076,6 +5152,10 @@ impl Application for App {
             }
             #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
             Message::OutputEvent(output_event, output) => {
+                if !matches!(self.mode, Mode::Desktop) {
+                    return Task::none();
+                }
+
                 match output_event {
                     OutputEvent::Created(output_info_opt) => {
                         let output_id = output.id();
@@ -5166,6 +5246,7 @@ impl Application for App {
             Message::None => {}
             #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
             Message::Overlap(w_id, overlap_notify_event) => match overlap_notify_event {
+                _ if !matches!(self.mode, Mode::Desktop) => {}
                 OverlapNotifyEvent::OverlapLayerAdd {
                     identifier,
                     namespace,
@@ -5216,6 +5297,10 @@ impl Application for App {
             }
             #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
             Message::Focused(id) => {
+                if !matches!(self.mode, Mode::Desktop) {
+                    return Task::none();
+                }
+
                 if let Some(w) = self.windows.get(&id) {
                     match &w.kind {
                         WindowKind::Desktop(entity) => self.tab_model.activate(*entity),
@@ -6379,48 +6464,7 @@ impl Application for App {
 
         let mut subscriptions = vec![
             //TODO: filter more events by window id
-            event::listen_with(|event, status, window_id| match event {
-                Event::Keyboard(KeyEvent::KeyPressed {
-                    key,
-                    modifiers,
-                    text,
-                    ..
-                }) => match status {
-                    // Only forward uncaptured key events (captured means a widget handled it)
-                    event::Status::Ignored => Some(Message::Key(window_id, modifiers, key, text)),
-                    event::Status::Captured => {
-                        if should_forward_captured_key(&key, modifiers) {
-                            Some(Message::Key(window_id, modifiers, key, text))
-                        } else {
-                            None
-                        }
-                    }
-                },
-                Event::Keyboard(KeyEvent::ModifiersChanged(modifiers)) => {
-                    Some(Message::ModifiersChanged(window_id, modifiers))
-                }
-                #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
-                Event::Window(WindowEvent::Focused) => Some(Message::Focused(window_id)),
-                Event::Window(WindowEvent::CloseRequested) => Some(Message::WindowClose),
-                Event::Window(WindowEvent::Opened { position: _, size }) => {
-                    Some(Message::Size(window_id, size))
-                }
-                Event::Window(WindowEvent::Resized(s)) => Some(Message::Size(window_id, s)),
-                #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
-                Event::PlatformSpecific(event::PlatformSpecific::Wayland(wayland_event)) => {
-                    match wayland_event {
-                        WaylandEvent::Output(output_event, output) => {
-                            Some(Message::OutputEvent(output_event, output))
-                        }
-                        #[cfg(feature = "desktop")]
-                        WaylandEvent::OverlapNotify(event, ..) => {
-                            Some(Message::Overlap(window_id, event))
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }),
+            event::listen_with(app_event_message),
             Config::subscription().map(|update| {
                 if !update.errors.is_empty() {
                     log::info!(
@@ -6661,6 +6705,11 @@ impl Application for App {
                 }),
             ),
         ];
+
+        #[cfg(all(feature = "wayland", feature = "desktop-applet"))]
+        if matches!(self.mode, Mode::Desktop) {
+            subscriptions.push(event::listen_with(desktop_event_message));
+        }
 
         if let Some(scroll_speed) = self.auto_scroll_speed {
             subscriptions.push(

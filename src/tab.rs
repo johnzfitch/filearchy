@@ -57,7 +57,7 @@ use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     cmp::{Ordering, Reverse},
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     error::Error,
     fmt::{self, Display},
     fs::{self, File, Metadata},
@@ -101,10 +101,14 @@ use uzers::{get_group_by_gid, get_user_by_uid};
 
 pub const DOUBLE_CLICK_DURATION: Duration = Duration::from_millis(500);
 pub const HOVER_DURATION: Duration = Duration::from_millis(1600);
+pub const LIST_COLUMNS_BREAKPOINT: f32 = 430.0;
 //TODO: best limit for search items
 const MAX_SEARCH_LATENCY: Duration = Duration::from_millis(20);
 const MAX_SEARCH_RESULTS: usize = 200;
 const SEARCH_READY_BATCH_SIZE: usize = 24;
+const LIST_MODIFIED_WIDTH: f32 = 168.0;
+const LIST_SIZE_WIDTH: f32 = 96.0;
+const DIR_SIZE_JOBS: usize = 2;
 //TODO: configurable thumbnail size?
 const THUMBNAIL_SIZE: u32 = (ICON_SIZE_GRID as u32) * (ICON_SCALE_MAX as u32);
 
@@ -112,6 +116,8 @@ const THUMBNAIL_SIZE: u32 = (ICON_SIZE_GRID as u32) * (ICON_SCALE_MAX as u32);
 // Uses 4 workers for balanced throughput and memory usage
 pub static THUMB_SEMAPHORE: LazyLock<tokio::sync::Semaphore> =
     LazyLock::new(|| tokio::sync::Semaphore::const_new(num_cpus::get().min(4)));
+pub static DIR_SIZE_SEMAPHORE: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::const_new(DIR_SIZE_JOBS));
 
 pub(crate) static SORT_OPTION_FALLBACK: LazyLock<FxHashMap<String, (HeadingOptions, bool)>> =
     LazyLock::new(|| {
@@ -1416,11 +1422,16 @@ pub fn scan_recents(sizes: IconSizes) -> Vec<Item> {
             return Vec::new();
         }
     };
+    let mut stale_paths = Vec::new();
+    let mut seen_paths = HashSet::new();
     let mut recents: Vec<_> = recent_files
         .bookmarks
         .into_iter()
         .filter_map(|bookmark| {
             let path = uri_to_path(bookmark.href)?;
+            if !seen_paths.insert(path.clone()) {
+                return None;
+            }
             let last_edit = bookmark.modified.parse::<chrono::DateTime<Utc>>().ok()?;
             let last_visit = bookmark.visited.parse::<chrono::DateTime<Utc>>().ok()?;
 
@@ -1443,11 +1454,21 @@ pub fn scan_recents(sizes: IconSizes) -> Vec<Item> {
                 let item = item_from_entry(path, name, metadata, sizes);
                 Some((item, last_edit.min(last_visit)))
             } else {
-                log::warn!("recent file path not exist: {}", path.display());
+                stale_paths.push(path);
                 None
             }
         })
         .collect();
+
+    if !stale_paths.is_empty() {
+        let stale_path_refs = stale_paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        if let Err(err) = recently_used_xbel::remove_recently_used(&stale_path_refs) {
+            log::debug!(
+                "failed to prune {} stale recents entries: {err:?}",
+                stale_path_refs.len()
+            );
+        }
+    }
 
     recents.sort_by_key(|recent| Reverse(recent.1));
 
@@ -2794,6 +2815,8 @@ pub struct Tab {
     pub thumb_config: ThumbCfg,
     pub sort_name: HeadingOptions,
     pub sort_direction: bool,
+    search_sort_name: HeadingOptions,
+    search_sort_direction: bool,
     pub gallery: bool,
     pub(crate) parent_item_opt: Option<Item>,
     pub(crate) items_opt: Option<Vec<Item>>,
@@ -2927,6 +2950,8 @@ impl Tab {
             thumb_config,
             sort_name,
             sort_direction,
+            search_sort_name: HeadingOptions::Modified,
+            search_sort_direction: false,
             gallery: false,
             parent_item_opt: None,
             items_opt: None,
@@ -3304,6 +3329,47 @@ impl Tab {
             )]
         } else {
             Vec::new()
+        }
+    }
+
+    fn list_size_text(&self, item: &Item) -> String {
+        let child_count_text = |children_opt: Option<usize>| match children_opt {
+            Some(1) => String::from("1 item"),
+            Some(children) => format!("{children} items"),
+            None => String::new(),
+        };
+
+        match &item.metadata {
+            ItemMetadata::Path {
+                metadata,
+                children_opt,
+            } => {
+                if metadata.is_dir() {
+                    match &item.dir_size {
+                        DirSize::Directory(size) => format_size(*size),
+                        DirSize::Calculating(_) | DirSize::NotDirectory | DirSize::Error(_) => {
+                            child_count_text(*children_opt)
+                        }
+                    }
+                } else {
+                    format_size(metadata.len())
+                }
+            }
+            ItemMetadata::Trash { metadata, .. } => match metadata.size {
+                trash::TrashItemSize::Entries(entries) => child_count_text(Some(entries)),
+                trash::TrashItemSize::Bytes(bytes) => format_size(bytes),
+            },
+            ItemMetadata::SimpleDir { entries } => child_count_text(Some(*entries as usize)),
+            ItemMetadata::SimpleFile { size } => format_size(*size),
+            #[cfg(feature = "gvfs")]
+            ItemMetadata::GvfsPath {
+                size_opt,
+                children_opt,
+                ..
+            } => match children_opt {
+                Some(child_count) => child_count_text(Some(*child_count)),
+                None => format_size(size_opt.unwrap_or_default()),
+            },
         }
     }
 
@@ -4291,7 +4357,10 @@ impl Tab {
                 commands.push(Command::SetPermissions(path, mode));
             }
             Message::SetSort(heading_option, dir) => {
-                if !matches!(self.location, Location::Search(..)) {
+                if matches!(self.location, Location::Search(..)) {
+                    self.search_sort_name = heading_option;
+                    self.search_sort_direction = dir;
+                } else {
                     self.sort_name = heading_option;
                     self.sort_direction = dir;
                     if !matches!(self.location, Location::Desktop(..)) {
@@ -4355,14 +4424,23 @@ impl Tab {
                 );
             }
             Message::ToggleSort(heading_option) => {
-                if !matches!(self.location, Location::Search(..)) {
-                    let heading_sort = if self.sort_name == heading_option {
-                        !self.sort_direction
+                let (current_name, current_direction) =
+                    if matches!(self.location, Location::Search(..)) {
+                        (self.search_sort_name, self.search_sort_direction)
                     } else {
-                        // Default modified to descending, and others to ascending.
-                        heading_option != HeadingOptions::Modified
+                        (self.sort_name, self.sort_direction)
                     };
+                let heading_sort = if current_name == heading_option {
+                    !current_direction
+                } else {
+                    // Default modified to descending, and others to ascending.
+                    heading_option != HeadingOptions::Modified
+                };
 
+                if matches!(self.location, Location::Search(..)) {
+                    self.search_sort_name = heading_option;
+                    self.search_sort_direction = heading_sort;
+                } else {
                     if !matches!(self.location, Location::Desktop(..)) {
                         commands.push(Command::SetSort(
                             self.location.normalize().to_string(),
@@ -4526,7 +4604,7 @@ impl Tab {
 
     pub(crate) const fn sort_options(&self) -> (HeadingOptions, bool, bool) {
         match self.location {
-            Location::Search(..) => (HeadingOptions::Modified, false, false),
+            Location::Search(..) => (self.search_sort_name, self.search_sort_direction, false),
             _ => (
                 self.sort_name,
                 self.sort_direction,
@@ -4935,10 +5013,9 @@ impl Tab {
         row = row.push(widget::Space::with_width(Length::Fixed(space_s.into())));
 
         //TODO: allow resizing?
-        let name_width = 300.0;
-        let modified_width = 200.0;
-        let size_width = 100.0;
-        let condensed = size.width < (name_width + modified_width + size_width);
+        let modified_width = LIST_MODIFIED_WIDTH;
+        let size_width = LIST_SIZE_WIDTH;
+        let condensed = size.width < LIST_COLUMNS_BREAKPOINT;
 
         let (sort_name, sort_direction, _) = self.sort_options();
         let heading_item = |name, width, msg| {
@@ -5629,10 +5706,9 @@ impl Tab {
 
         let size = self.size_opt.get().unwrap_or_else(|| Size::new(0.0, 0.0));
         //TODO: allow resizing?
-        let name_width = 300.0;
-        let modified_width = 200.0;
-        let size_width = 100.0;
-        let condensed = size.width < (name_width + modified_width + size_width);
+        let modified_width = LIST_MODIFIED_WIDTH;
+        let size_width = LIST_SIZE_WIDTH;
+        let condensed = size.width < LIST_COLUMNS_BREAKPOINT;
         let is_search = matches!(self.location, Location::Search(..));
         let icon_size = if condensed || is_search {
             icon_sizes.list_condensed()
@@ -5703,62 +5779,7 @@ impl Tab {
                         _ => String::new(),
                     };
 
-                    let size_text = match &item.metadata {
-                        ItemMetadata::Path {
-                            metadata,
-                            children_opt,
-                        } => {
-                            if metadata.is_dir() {
-                                //TODO: translate
-                                if let Some(children) = children_opt {
-                                    if *children == 1 {
-                                        format!("{children} item")
-                                    } else {
-                                        format!("{children} items")
-                                    }
-                                } else {
-                                    String::new()
-                                }
-                            } else {
-                                format_size(metadata.len())
-                            }
-                        }
-                        ItemMetadata::Trash { metadata, .. } => match metadata.size {
-                            trash::TrashItemSize::Entries(entries) => {
-                                //TODO: translate
-                                if entries == 1 {
-                                    format!("{entries} item")
-                                } else {
-                                    format!("{entries} items")
-                                }
-                            }
-                            trash::TrashItemSize::Bytes(bytes) => format_size(bytes),
-                        },
-                        ItemMetadata::SimpleDir { entries } => {
-                            //TODO: translate
-                            if *entries == 1 {
-                                format!("{entries} item")
-                            } else {
-                                format!("{entries} items")
-                            }
-                        }
-                        ItemMetadata::SimpleFile { size } => format_size(*size),
-                        #[cfg(feature = "gvfs")]
-                        ItemMetadata::GvfsPath {
-                            size_opt,
-                            children_opt,
-                            ..
-                        } => match children_opt {
-                            Some(child_count) => {
-                                if *child_count == 1 {
-                                    format!("{child_count} item")
-                                } else {
-                                    format!("{child_count} items")
-                                }
-                            }
-                            None => format_size(size_opt.unwrap_or_default()),
-                        },
-                    };
+                    let size_text = self.list_size_text(item);
 
                     let row = if condensed {
                         widget::row::with_children([
@@ -5811,12 +5832,15 @@ impl Tab {
                                 .into(),
                             widget::text::body(item.display_name.clone())
                                 .width(Length::Fill)
+                                .wrapping(text::Wrapping::None)
                                 .into(),
                             widget::text::body(modified_text.clone())
                                 .width(Length::Fixed(modified_width))
+                                .wrapping(text::Wrapping::None)
                                 .into(),
                             widget::text::body(size_text.clone())
                                 .width(Length::Fixed(size_width))
+                                .wrapping(text::Wrapping::None)
                                 .into(),
                         ])
                         .height(Length::Fixed(f32::from(row_height)))
@@ -5920,12 +5944,15 @@ impl Tab {
                                     .into(),
                                 widget::text::body(item.display_name.clone())
                                     .width(Length::Fill)
+                                    .wrapping(text::Wrapping::None)
                                     .into(),
                                 widget::text(modified_text)
                                     .width(Length::Fixed(modified_width))
+                                    .wrapping(text::Wrapping::None)
                                     .into(),
                                 widget::text::body(size_text)
                                     .width(Length::Fixed(size_width))
+                                    .wrapping(text::Wrapping::None)
                                     .into(),
                             ])
                             .align_y(Alignment::Center)
@@ -6410,9 +6437,39 @@ impl Tab {
                 }
             }
 
-            if preview {
-                // Load directory size for selected items
+            let mut dir_size_requests: Vec<(PathBuf, Controller)> = Vec::new();
+            if self.config.view == View::List {
+                for item in items {
+                    if dir_size_requests.len() >= DIR_SIZE_JOBS {
+                        break;
+                    }
 
+                    let Some(rect) = item.rect_opt.get() else {
+                        continue;
+                    };
+                    if !rect.intersects(&visible_rect) {
+                        continue;
+                    }
+
+                    let Some(path) = item.path_opt().cloned() else {
+                        continue;
+                    };
+                    let DirSize::Calculating(controller) = &item.dir_size else {
+                        continue;
+                    };
+
+                    if dir_size_requests
+                        .iter()
+                        .any(|(other_path, _)| *other_path == path)
+                    {
+                        continue;
+                    }
+
+                    dir_size_requests.push((path, controller.clone()));
+                }
+            }
+
+            if preview {
                 let mut selected_items: Vec<&Item> =
                     items.iter().filter(|item| item.selected).collect();
 
@@ -6421,60 +6478,74 @@ impl Tab {
                         selected_items.push(p)
                     }
                 }
+
                 for item in selected_items {
-                    // Item must have a path
-                    if let Some(path) = item.path_opt().cloned() {
-                        // Item must be calculating directory size
-                        if let DirSize::Calculating(controller) = &item.dir_size {
-                            let controller = controller.clone();
-                            subscriptions.push(Subscription::run_with_id(
-                                ("dir_size", path.clone()),
-                                stream::channel(1, |mut output| async move {
-                                    let message = {
-                                        let start = Instant::now();
-                                        match calculate_dir_size(&path, controller).await {
-                                            Ok(size) => {
-                                                log::debug!(
-                                                    "calculated directory size of {} in {:?}",
-                                                    path.display(),
-                                                    start.elapsed()
-                                                );
-                                                Message::DirectorySize(
-                                                    path.clone(),
-                                                    DirSize::Directory(size),
-                                                )
-                                            }
-                                            Err(err) => {
-                                                log::warn!(
-                                                    "failed to calculate directory size of {}: {}",
-                                                    path.display(),
-                                                    err
-                                                );
-                                                Message::DirectorySize(
-                                                    path.clone(),
-                                                    DirSize::Error(err.to_string()),
-                                                )
-                                            }
-                                        }
-                                    };
-
-                                    match output.send(message).await {
-                                        Ok(()) => {}
-                                        Err(err) => {
-                                            log::warn!(
-                                                "failed to send directory size for {}: {}",
-                                                path.display(),
-                                                err
-                                            );
-                                        }
-                                    }
-
-                                    std::future::pending().await
-                                }),
-                            ));
-                        }
+                    if dir_size_requests.len() >= DIR_SIZE_JOBS {
+                        break;
                     }
+
+                    let Some(path) = item.path_opt().cloned() else {
+                        continue;
+                    };
+                    let DirSize::Calculating(controller) = &item.dir_size else {
+                        continue;
+                    };
+
+                    if dir_size_requests
+                        .iter()
+                        .any(|(other_path, _)| *other_path == path)
+                    {
+                        continue;
+                    }
+
+                    dir_size_requests.push((path, controller.clone()));
                 }
+            }
+
+            for (path, controller) in dir_size_requests {
+                subscriptions.push(Subscription::run_with_id(
+                    ("dir_size", path.clone()),
+                    stream::channel(1, |mut output| async move {
+                        let message = {
+                            let start = Instant::now();
+                            let _permit = DIR_SIZE_SEMAPHORE.acquire().await;
+                            match calculate_dir_size(&path, controller).await {
+                                Ok(size) => {
+                                    log::debug!(
+                                        "calculated directory size of {} in {:?}",
+                                        path.display(),
+                                        start.elapsed()
+                                    );
+                                    Message::DirectorySize(path.clone(), DirSize::Directory(size))
+                                }
+                                Err(err) => {
+                                    log::warn!(
+                                        "failed to calculate directory size of {}: {}",
+                                        path.display(),
+                                        err
+                                    );
+                                    Message::DirectorySize(
+                                        path.clone(),
+                                        DirSize::Error(err.to_string()),
+                                    )
+                                }
+                            }
+                        };
+
+                        match output.send(message).await {
+                            Ok(()) => {}
+                            Err(err) => {
+                                log::warn!(
+                                    "failed to send directory size for {}: {}",
+                                    path.display(),
+                                    err
+                                );
+                            }
+                        }
+
+                        std::future::pending().await
+                    }),
+                ));
             }
         }
 
@@ -6853,7 +6924,7 @@ mod tests {
     use std::{
         fs, io,
         path::PathBuf,
-        time::{Duration, SystemTime},
+        time::{Duration, Instant, SystemTime},
     };
 
     use cosmic::{iced::mouse::ScrollDelta, iced_runtime::keyboard::Modifiers, widget};
@@ -6862,7 +6933,8 @@ mod tests {
     use test_log::test;
 
     use super::{
-        Location, Message, Tab, respond_to_scroll_direction, scan_path, search_result_insert_cmp,
+        HeadingOptions, Location, Message, Tab, respond_to_scroll_direction, scan_path,
+        search_result_insert_cmp,
     };
     use crate::{
         app::test_utils::{
@@ -7271,6 +7343,38 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn search_sort_can_change_without_overwriting_folder_sort() -> io::Result<()> {
+        let fs = empty_fs()?;
+        let path = fs.path().to_path_buf();
+        let mut tab = Tab::new(
+            Location::Search(path.clone(), String::from("shot"), false, Instant::now()),
+            TabConfig::default(),
+            ThumbCfg::default(),
+            None,
+            widget::Id::unique(),
+            None,
+        );
+
+        assert_eq!(tab.sort_options(), (HeadingOptions::Modified, false, false));
+
+        let commands = tab.update(
+            Message::ToggleSort(HeadingOptions::Name),
+            Modifiers::empty(),
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|command| !matches!(command, super::Command::SetSort(..)))
+        );
+        assert_eq!(tab.sort_options(), (HeadingOptions::Name, true, false));
+
+        tab.change_location(&Location::Path(path), None);
+        assert_eq!(tab.sort_options(), (HeadingOptions::Name, true, true));
+
+        Ok(())
     }
 
     #[test]

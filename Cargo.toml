@@ -105,7 +105,6 @@ required-features = ["gvfs"]
 [features]
 default = [
     "bzip2",
-    "dbus-config",
     "desktop",
     "gvfs",
     "io-uring",

@@ -113,6 +113,16 @@ fn key_is_character(key: &Key, expected: &str) -> bool {
     matches!(key, Key::Character(chars) if chars.eq_ignore_ascii_case(expected))
 }
 
+/// Decide whether a key event that was captured by a widget should still be
+/// forwarded to the app-level `Message::Key` handler. This is needed for:
+/// - Insert key (Shift+Insert paste, Ctrl+Insert copy)
+/// - Clipboard shortcuts (Ctrl/Super+C/X/V) when a non-text widget captures focus
+/// - Bare character keys for type-to-search (safe because the `Message::Key`
+///   handler guards with `!editing_text_input` before acting on them)
+///
+/// NOTE: No key_binds use bare character keys without modifiers, so forwarding
+/// captured bare chars cannot trigger unintended actions during text editing.
+/// If bare-char key_binds are ever added, this function must be revisited.
 fn should_forward_captured_key(key: &Key, modifiers: Modifiers) -> bool {
     if matches!(key, Key::Named(cosmic::iced::keyboard::key::Named::Insert)) {
         return true;
@@ -133,6 +143,9 @@ fn should_forward_captured_key(key: &Key, modifiers: Modifiers) -> bool {
         return true;
     }
 
+    // Forward bare character keys for type-to-search. The Message::Key handler
+    // checks editing_text_input before acting on these, so text input isolation
+    // is preserved.
     matches!(key, Key::Character(_))
         && !modifiers.logo()
         && !modifiers.control()

@@ -1153,7 +1153,12 @@ fn search_result_insert_cmp(
     inserted_modified: Option<SystemTime>,
     existing_modified: Option<SystemTime>,
 ) -> Ordering {
-    // Search results are kept in descending modified order.
+    // Search results are kept in descending modified order. This means the retained
+    // MAX_SEARCH_RESULTS items are always the most-recently-modified matches.
+    // When the user sorts by Name or Size, column_sort re-orders these items, but
+    // older matches that would rank higher under that sort never enter the set.
+    //TODO: consider re-inserting by the active search sort column, or retaining a
+    // larger candidate set and pruning after sort.
     inserted_modified.cmp(&existing_modified)
 }
 
@@ -4629,7 +4634,10 @@ impl Tab {
                             children_opt,
                         } => {
                             if metadata.is_dir() {
-                                (true, children_opt.unwrap_or_default() as u64)
+                                match &x.dir_size {
+                                    DirSize::Directory(size) => (true, *size),
+                                    _ => (true, children_opt.unwrap_or_default() as u64),
+                                }
                             } else {
                                 (false, metadata.len())
                             }
@@ -6438,17 +6446,22 @@ impl Tab {
             }
 
             let mut dir_size_requests: Vec<(PathBuf, Controller)> = Vec::new();
-            if self.config.view == View::List {
-                for item in items {
+
+            // Prioritize selected/previewed items so their dir_size is calculated
+            // before visible-but-unselected items fill all available slots.
+            if preview {
+                let mut selected_items: Vec<&Item> =
+                    items.iter().filter(|item| item.selected).collect();
+
+                if selected_items.is_empty() {
+                    if let Some(p) = self.parent_item_opt.as_ref() {
+                        selected_items.push(p)
+                    }
+                }
+
+                for item in selected_items {
                     if dir_size_requests.len() >= DIR_SIZE_JOBS {
                         break;
-                    }
-
-                    let Some(rect) = item.rect_opt.get() else {
-                        continue;
-                    };
-                    if !rect.intersects(&visible_rect) {
-                        continue;
                     }
 
                     let Some(path) = item.path_opt().cloned() else {
@@ -6469,19 +6482,18 @@ impl Tab {
                 }
             }
 
-            if preview {
-                let mut selected_items: Vec<&Item> =
-                    items.iter().filter(|item| item.selected).collect();
-
-                if selected_items.is_empty() {
-                    if let Some(p) = self.parent_item_opt.as_ref() {
-                        selected_items.push(p)
-                    }
-                }
-
-                for item in selected_items {
+            // Fill remaining slots from visible list items
+            if self.config.view == View::List {
+                for item in items {
                     if dir_size_requests.len() >= DIR_SIZE_JOBS {
                         break;
+                    }
+
+                    let Some(rect) = item.rect_opt.get() else {
+                        continue;
+                    };
+                    if !rect.intersects(&visible_rect) {
+                        continue;
                     }
 
                     let Some(path) = item.path_opt().cloned() else {
